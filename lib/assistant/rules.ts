@@ -33,8 +33,8 @@ import {
 import { normalisePhoneTo94 } from "@/lib/sms/notifylk";
 import {
   appendInquirySnippet,
+  applySalesTurnFields,
   complaintOtpWaybill,
-  extractInquiryFieldsFromText,
   formatComplaintDraftReply,
   isApproveIntent,
   isActiveSalesConversation,
@@ -44,7 +44,6 @@ import {
   isInquirySubmitIntent,
   isRejectIntent,
   isRichSalesInquiry,
-  mergeInquiryFields,
   nextSalesQuestion,
   organizeComplaintText,
   organizeInquirySummary,
@@ -666,9 +665,9 @@ export async function runRuleAssistant(
     !isConversationClosing(normalized) &&
     !isInquirySubmitIntent(normalized)
   ) {
-    const fields = mergeInquiryFields(
+    const fields = applySalesTurnFields(
       supportState.inquiryBuffer.fields,
-      extractInquiryFieldsFromText(message)
+      message
     );
 
     const midBuf = appendInquirySnippet(
@@ -695,7 +694,7 @@ export async function runRuleAssistant(
 
   // First rich business/export message — warm opener, one question
   if (isRichSalesInquiry(normalized) || isBusinessInquiry(normalized)) {
-    const fields = extractInquiryFieldsFromText(message);
+    const fields = applySalesTurnFields(null, message);
 
     supportState = {
       ...supportState,

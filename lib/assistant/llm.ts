@@ -31,15 +31,17 @@ import {
 import { normalisePhoneTo94 } from "@/lib/sms/notifylk";
 import {
   appendInquirySnippet,
-  extractInquiryFieldsFromText,
+  applySalesTurnFields,
   formatComplaintDraftReply,
   inquiryContextForPrompt,
   isActiveSalesConversation,
   isRichSalesInquiry,
+  nextSalesQuestion,
   organizeComplaintText,
   parseSupportState,
   recoverInquiryFromHistory,
   salesDiscoveryFallbackReply,
+  salesReplyIgnoresKnownFields,
   type SupportState,
 } from "@/lib/assistant/session-state";
 
@@ -580,7 +582,9 @@ async function runTool(
         callerPhone: normalisePhoneTo94(phoneArg) || phoneArg,
       };
     }
-    const fields: Record<string, string> = {};
+    const fields: Record<string, string> = {
+      ...applySalesTurnFields(state.supportState.inquiryBuffer?.fields, note),
+    };
     const map: Array<[string, string]> = [
       ["product", "product"],
       ["destination", "destination"],
@@ -746,6 +750,10 @@ async function runGeminiInner(
 
   function ensureInquiryBuffered(userNote: string) {
     if (state.supportState.inquiryBuffer) {
+      const fields = applySalesTurnFields(
+        state.supportState.inquiryBuffer.fields,
+        userNote
+      );
       state = {
         ...state,
         supportState: {
@@ -753,13 +761,13 @@ async function runGeminiInner(
           inquiryBuffer: appendInquirySnippet(
             state.supportState.inquiryBuffer,
             userNote,
-            { priority: "high", contactPhone: state.callerPhone }
+            { priority: "high", contactPhone: state.callerPhone, fields }
           ),
         },
       };
       return;
     }
-    const fields = extractInquiryFieldsFromText(userNote);
+    const fields = applySalesTurnFields(null, userNote);
     state = {
       ...state,
       supportState: {
@@ -853,7 +861,7 @@ async function runGeminiInner(
       continue;
     }
 
-    const reply =
+    let reply =
       response.text?.trim() ||
       (state.supportState.inquiryBuffer || salesLead
         ? salesDiscoveryFallbackReply(
@@ -866,6 +874,14 @@ async function runGeminiInner(
     // Always keep inquiry session alive for sales chats (even if model skipped the tool)
     if (salesLead || state.supportState.inquiryBuffer) {
       ensureInquiryBuffered(lastUserText);
+    }
+
+    // If the model re-asks for something we already captured, advance the script
+    if (
+      state.supportState.inquiryBuffer &&
+      salesReplyIgnoresKnownFields(reply, state.supportState.inquiryBuffer.fields)
+    ) {
+      reply = nextSalesQuestion(state.supportState.inquiryBuffer);
     }
 
     return {
