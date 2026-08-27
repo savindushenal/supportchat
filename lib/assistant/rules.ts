@@ -34,6 +34,7 @@ import { normalisePhoneTo94 } from "@/lib/sms/notifylk";
 import {
   appendInquirySnippet,
   complaintOtpWaybill,
+  extractInquiryFieldsFromText,
   formatComplaintDraftReply,
   isApproveIntent,
   isActiveSalesConversation,
@@ -43,6 +44,7 @@ import {
   isInquirySubmitIntent,
   isRejectIntent,
   isRichSalesInquiry,
+  mergeInquiryFields,
   nextSalesQuestion,
   organizeComplaintText,
   organizeInquirySummary,
@@ -664,40 +666,10 @@ export async function runRuleAssistant(
     !isConversationClosing(normalized) &&
     !isInquirySubmitIntent(normalized)
   ) {
-    const fields: Record<string, string> = {
-      ...supportState.inquiryBuffer.fields,
-    };
-    const productMatch = normalized.match(
-      /\b(kurundu|cinnamon|tea|spice|spices|garment|apparel|coconut|rubber)\b/i
+    const fields = mergeInquiryFields(
+      supportState.inquiryBuffer.fields,
+      extractInquiryFieldsFromText(message)
     );
-    const destMatch = normalized.match(
-      /\b(australia|aussie|usa|uk|canada|dubai|singapore|malaysia|europe)\b/i
-    );
-    const packsMatch = normalized.match(
-      /(\d+)\s*(?:to|-|–)\s*(\d+)\s*(packs?|packages?|cartons?|boxes)?/i
-    );
-    const singlePacks = normalized.match(
-      /\b(?:about|around|approx(?:imately)?)?\s*(\d+)\s*(packs?|packages?|cartons?|boxes)\b/i
-    );
-    const weight = normalized.match(
-      /\b(\d+(?:\.\d+)?)\s*(kg|kgs|kilograms?)\b/i
-    );
-    if (productMatch) fields.product = productMatch[1];
-    if (destMatch) fields.destination = destMatch[1];
-    if (packsMatch) {
-      fields.min_packs = packsMatch[1];
-      fields.max_packs = packsMatch[2];
-    } else if (singlePacks) {
-      fields.min_packs = singlePacks[1];
-      fields.max_packs = singlePacks[1];
-    }
-    if (weight) fields.weight_or_size = `${weight[1]} ${weight[2]}`;
-    if (/\b(weekly|monthly|daily|as\s*needed|occasionally)\b/i.test(normalized)) {
-      const freq = normalized.match(
-        /\b(weekly|monthly|daily|as\s*needed|occasionally)\b/i
-      );
-      if (freq) fields.frequency = freq[1];
-    }
 
     const midBuf = appendInquirySnippet(
       supportState.inquiryBuffer,
@@ -723,15 +695,7 @@ export async function runRuleAssistant(
 
   // First rich business/export message — warm opener, one question
   if (isRichSalesInquiry(normalized) || isBusinessInquiry(normalized)) {
-    const fields: Record<string, string> = {};
-    const productMatch = normalized.match(
-      /\b(kurundu|cinnamon|tea|spice|spices|garment|apparel|coconut|rubber)\b/i
-    );
-    const destMatch = normalized.match(
-      /\b(australia|aussie|usa|uk|canada|dubai|singapore|malaysia|europe)\b/i
-    );
-    if (productMatch) fields.product = productMatch[1];
-    if (destMatch) fields.destination = destMatch[1];
+    const fields = extractInquiryFieldsFromText(message);
 
     supportState = {
       ...supportState,
@@ -747,7 +711,7 @@ export async function runRuleAssistant(
       ),
     };
     return {
-      reply: salesDiscoveryFallbackReply(message),
+      reply: salesDiscoveryFallbackReply(message, fields),
       ...base(),
       suggestions: ["help"],
     };

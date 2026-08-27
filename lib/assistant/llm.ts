@@ -31,6 +31,7 @@ import {
 import { normalisePhoneTo94 } from "@/lib/sms/notifylk";
 import {
   appendInquirySnippet,
+  extractInquiryFieldsFromText,
   formatComplaintDraftReply,
   inquiryContextForPrompt,
   isActiveSalesConversation,
@@ -758,16 +759,7 @@ async function runGeminiInner(
       };
       return;
     }
-    const n = userNote.toLowerCase();
-    const fields: Record<string, string> = {};
-    const productMatch = n.match(
-      /\b(kurundu|cinnamon|tea|spice|spices|garment|apparel|coconut|rubber)\b/i
-    );
-    const destMatch = n.match(
-      /\b(australia|aussie|usa|uk|canada|dubai|singapore|malaysia|europe)\b/i
-    );
-    if (productMatch) fields.product = productMatch[1];
-    if (destMatch) fields.destination = destMatch[1];
+    const fields = extractInquiryFieldsFromText(userNote);
     state = {
       ...state,
       supportState: {
@@ -866,7 +858,8 @@ async function runGeminiInner(
       (state.supportState.inquiryBuffer || salesLead
         ? salesDiscoveryFallbackReply(
             options.history.filter((h) => h.role === "user").slice(-1)[0]
-              ?.text || "export inquiry"
+              ?.text || "export inquiry",
+            state.supportState.inquiryBuffer?.fields
           )
         : "How can I help with your shipment today?");
 

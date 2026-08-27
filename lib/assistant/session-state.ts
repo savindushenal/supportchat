@@ -192,9 +192,165 @@ export function pricingFaqReply(normalized: string): string | null {
   );
 }
 
+const EXPORT_COUNTRY_ALIASES: Record<string, string> = {
+  nz: "New Zealand",
+  "new zealand": "New Zealand",
+  australia: "Australia",
+  aussie: "Australia",
+  au: "Australia",
+  usa: "USA",
+  us: "USA",
+  "united states": "USA",
+  america: "USA",
+  uk: "UK",
+  "united kingdom": "UK",
+  england: "UK",
+  canada: "Canada",
+  ca: "Canada",
+  dubai: "Dubai",
+  uae: "UAE",
+  singapore: "Singapore",
+  sg: "Singapore",
+  malaysia: "Malaysia",
+  europe: "Europe",
+  germany: "Germany",
+  france: "France",
+  japan: "Japan",
+  china: "China",
+  india: "India",
+  korea: "South Korea",
+  "south korea": "South Korea",
+  italy: "Italy",
+  netherlands: "Netherlands",
+  sweden: "Sweden",
+  norway: "Norway",
+  qatar: "Qatar",
+  saudi: "Saudi Arabia",
+  "saudi arabia": "Saudi Arabia",
+  "middle east": "Middle East",
+  thailand: "Thailand",
+  vietnam: "Vietnam",
+  indonesia: "Indonesia",
+};
+
+const EXPORT_PRODUCT_WORDS =
+  /\b(kurundu|cinnamon|tea|spice|spices|garment|apparel|coconut|rubber|gems?|jewellery|jewelry|handicrafts?|cosmetics?|snacks?|food\s*items?)\b/i;
+
+const DESTINATION_STOP_WORDS = new Set([
+  "send",
+  "ship",
+  "export",
+  "deliver",
+  "you",
+  "get",
+  "find",
+  "know",
+  "see",
+  "make",
+  "them",
+  "me",
+  "us",
+  "my",
+  "the",
+  "a",
+  "an",
+]);
+
+/** Pull structured sales fields from free-text (rules fallback + buffer merge). */
+export function extractInquiryFieldsFromText(text: string): Record<string, string> {
+  const fields: Record<string, string> = {};
+  const n = text.toLowerCase().replace(/\s+/g, " ").trim();
+  if (!n) return fields;
+
+  const productMatch = n.match(EXPORT_PRODUCT_WORDS);
+  if (productMatch) {
+    fields.product =
+      productMatch[1].charAt(0).toUpperCase() + productMatch[1].slice(1).toLowerCase();
+  }
+
+  const countryKeys = Object.keys(EXPORT_COUNTRY_ALIASES).sort(
+    (a, b) => b.length - a.length
+  );
+  for (const key of countryKeys) {
+    const re = new RegExp(`\\b${key.replace(/\s+/g, "\\s+")}\\b`, "i");
+    if (re.test(n)) {
+      fields.destination = EXPORT_COUNTRY_ALIASES[key];
+      break;
+    }
+  }
+
+  if (!fields.destination) {
+    const toPatterns = [
+      /\b(?:send|ship|export|deliver|post|mail|courier|freight|transport|move|sending|shipping)\s+(?:a\s+|my\s+|the\s+)?(?:\w+\s+){0,4}?(?:to|towards?)\s+([a-z]{2,}(?:\s+[a-z]{2,})?)\b/i,
+      /\b(?:going|headed|heading)\s+to\s+([a-z]{2,}(?:\s+[a-z]{2,})?)\b/i,
+      /\b(?:to|for|into)\s+([a-z]{2,}(?:\s+[a-z]{2,})?)\b/i,
+    ];
+    for (const pat of toPatterns) {
+      const m = n.match(pat);
+      if (!m?.[1]) continue;
+      const candidate = m[1].trim().toLowerCase();
+      if (DESTINATION_STOP_WORDS.has(candidate)) continue;
+      const resolved = EXPORT_COUNTRY_ALIASES[candidate];
+      if (resolved) {
+        fields.destination = resolved;
+        break;
+      }
+      if (/^[a-z]{2,3}$/.test(candidate)) {
+        fields.destination = candidate.toUpperCase();
+        break;
+      }
+    }
+  }
+
+  const packsRange = n.match(
+    /(\d+)\s*(?:to|-|–)\s*(\d+)\s*(packs?|packages?|cartons?|boxes)?/i
+  );
+  const packsSingle = n.match(
+    /\b(?:about|around|approx(?:imately)?)?\s*(\d+)\s*(packs?|packages?|cartons?|boxes)\b/i
+  );
+  const weight = n.match(/\b(\d+(?:\.\d+)?)\s*(kg|kgs|kilograms?)\b/i);
+  if (packsRange) {
+    fields.min_packs = packsRange[1];
+    fields.max_packs = packsRange[2];
+  } else if (packsSingle) {
+    fields.min_packs = packsSingle[1];
+    fields.max_packs = packsSingle[1];
+  }
+  if (weight) fields.weight_or_size = `${weight[1]} ${weight[2]}`;
+  const freq = n.match(/\b(weekly|monthly|daily|as\s*needed|occasionally)\b/i);
+  if (freq) fields.frequency = freq[1];
+
+  return fields;
+}
+
+export function mergeInquiryFields(
+  base: Record<string, string> | undefined | null,
+  extracted: Record<string, string>
+): Record<string, string> {
+  const merged = { ...(base || {}) };
+  for (const [k, v] of Object.entries(extracted)) {
+    if (v?.trim()) merged[k] = v.trim();
+  }
+  return merged;
+}
+
 /** Export, bulk, corporate, international — needs multi-turn Gemini discovery. */
 export function isRichSalesInquiry(normalized: string): boolean {
-  return /\b(export|import|international|overseas|australia|aussie|usa|uk|canada|dubai|middle\s*east|europe|singapore|malaysia|bulk|corporate|b2b|business|company|partnership|contract|wholesale|shipment\s*to|ship\s*to|kurundu|cinnamon|tea|spice|cargo|freight|consignment\s*to|best\s*rate|special\s*rate|volume|packs?|packages?|cartons?|pallets?|boxes|\d+\s*kg|kilograms?)\b/i.test(
+  if (
+    /\b(want|wanna|need|like|plan|planning)\s+to\s+(send|ship|export|deliver|post|mail)\b/i.test(
+      normalized
+    )
+  ) {
+    return true;
+  }
+  if (
+    /\b(send|ship|export|deliver|post|mail|courier)\s+(a\s+|my\s+|the\s+)?(package|parcel|goods?|item|product|shipment|box|carton)s?\s+to\b/i.test(
+      normalized
+    )
+  ) {
+    return true;
+  }
+  return /\b(export|import|international|overseas|new\s*zealand|\bnz\b|australia|aussie|usa|uk|canada|dubai|middle\s*east|europe|singapore|malaysia|bulk|corporate|b2b|business|company|partnership|contract|wholesale|shipment\s*to|ship\s*to|kurundu|cinnamon|tea|spice|cargo|freight|consignment\s*to|best\s*rate|special\s*rate|volume|packs?|packages?|cartons?|pallets?|boxes|\d+\s*kg|kilograms?)\b/i.test(
     normalized
   );
 }
@@ -210,7 +366,7 @@ export function isActiveSalesConversation(
     if (!t?.text) continue;
     const text = t.text.toLowerCase();
     if (
-      /\b(export|australia|cinnamon|kurundu|best\s*quote|competitive\s*export|per\s*shipment|how\s*many\s*(packs?|packages?|cartons?)|how\s*much\s*weight|sales\s*team|quote|packages?\s*do\s*you)\b/i.test(
+      /\b(export|new\s*zealand|\bnz\b|australia|cinnamon|kurundu|best\s*quote|competitive\s*export|per\s*shipment|how\s*many\s*(packs?|packages?|cartons?)|how\s*much\s*weight|sales\s*team|quote|packages?\s*do\s*you|send\s*(a\s+)?package|ship\s*to|want\s*to\s*send)\b/i.test(
         text
       )
     ) {
@@ -233,30 +389,7 @@ export function recoverInquiryFromHistory(
     if (turn.role !== "user" || !turn.text?.trim()) continue;
     const text = turn.text.trim();
     snippets.push(text);
-    const n = text.toLowerCase();
-    const productMatch = n.match(
-      /\b(kurundu|cinnamon|tea|spice|spices|garment|apparel|coconut|rubber)\b/i
-    );
-    const destMatch = n.match(
-      /\b(australia|aussie|usa|uk|canada|dubai|singapore|malaysia|europe)\b/i
-    );
-    const packsRange = n.match(
-      /(\d+)\s*(?:to|-|–)\s*(\d+)\s*(packs?|packages?|cartons?|boxes)?/i
-    );
-    const packsSingle = n.match(
-      /\b(?:about|around|approx(?:imately)?)?\s*(\d+)\s*(packs?|packages?|cartons?|boxes)\b/i
-    );
-    const weight = n.match(/\b(\d+(?:\.\d+)?)\s*(kg|kgs|kilograms?)\b/i);
-    if (productMatch) fields.product = productMatch[1];
-    if (destMatch) fields.destination = destMatch[1];
-    if (packsRange) {
-      fields.min_packs = packsRange[1];
-      fields.max_packs = packsRange[2];
-    } else if (packsSingle) {
-      fields.min_packs = packsSingle[1];
-      fields.max_packs = packsSingle[1];
-    }
-    if (weight) fields.weight_or_size = `${weight[1]} ${weight[2]}`;
+    Object.assign(fields, mergeInquiryFields(fields, extractInquiryFieldsFromText(text)));
   }
   if (!snippets.length) return null;
 
@@ -296,74 +429,81 @@ export function isBusinessInquiry(normalized: string): boolean {
 
 export function isInquiryIntent(normalized: string): boolean {
   if (isBusinessInquiry(normalized)) return true;
-  return /\b(inquir(y|ies)|enquire|enquiry|quote|quotation|partnership|sales|how\s*(do|can)\s*i\s*(send|ship)|open\s*an?\s*account)\b/i.test(
+  return /\b(inquir(y|ies)|enquire|enquiry|quote|quotation|partnership|sales|how\s*(do|can)\s*i\s*(send|ship)|(?:want|wanna|need|like)\s*to\s*(send|ship|export|deliver)|open\s*an?\s*account)\b/i.test(
     normalized
   );
 }
 
 /**
  * Warm one-question opener / fallback — never a form checklist.
- * Customers leave when we dump 6 fields at once.
+ * Acknowledges what the customer already said; asks only what's missing.
  */
-export function salesDiscoveryFallbackReply(firstMessage: string): string {
-  const text = firstMessage.toLowerCase();
-  const productMatch = text.match(
-    /\b(kurundu|cinnamon|tea|spice|spices|garment|apparel|coconut|rubber|gems?|jewellery|jewelry)\b/i
+export function salesDiscoveryFallbackReply(
+  firstMessage: string,
+  knownFields?: Record<string, string> | null
+): string {
+  const fields = mergeInquiryFields(
+    knownFields,
+    extractInquiryFieldsFromText(firstMessage)
   );
-  const destMatch = text.match(
-    /\b(australia|aussie|usa|uk|canada|dubai|singapore|malaysia|europe|germany|france|japan|china)\b/i
-  );
-  const product = productMatch?.[1];
-  const dest = destMatch?.[1];
+  const product = fields.product;
+  const dest = fields.destination;
+  const n = firstMessage.toLowerCase();
 
   if (product && dest) {
     return (
-      `Nice — exporting **${product}** to **${dest}** sounds great, and we can help with rates.\n\n` +
-      `Roughly how many packs or cartons would you ship at a time — say a minimum and a maximum?`
-    );
-  }
-  if (product) {
-    return (
-      `Got it — happy to help with **${product}** export rates.\n\n` +
-      `Which country are you looking to ship to?`
+      `Nice — **${product}** to **${dest}** is something we handle often.\n\n` +
+      `Roughly how many packs or cartons would go in one shipment? A ballpark min–max is fine.`
     );
   }
   if (dest) {
     return (
-      `Sure — we can look at options for **${dest}**.\n\n` +
-      `What product will you be exporting?`
+      `**${dest}** — got it, we can help you ship there.\n\n` +
+      `What are you sending — spices, clothing, personal goods, or something else?`
+    );
+  }
+  if (product) {
+    return (
+      `**${product}** — nice. We can look at export options for that.\n\n` +
+      `Which country should it go to?`
+    );
+  }
+  if (/\b(send|ship|export|deliver|post|mail|courier|package|parcel)\b/i.test(n)) {
+    return (
+      `Sure, I can help with that.\n\n` +
+      `Which country are you sending to?`
     );
   }
   return (
-    `Happy to help you find better rates for that.\n\n` +
-    `What's the product, and which country do you want to export to?`
+    `Happy to help with export rates.\n\n` +
+    `Where are you looking to ship to?`
   );
 }
 
 /** Next single question from what we already know (rules / fallback). */
 export function nextSalesQuestion(buffer: InquiryBuffer | null): string {
   const f = buffer?.fields || {};
-  if (!f.product) {
-    return "What product will you be exporting?";
-  }
   if (!f.destination) {
-    return "Which country (and city, if you know) should it go to?";
+    return "Which country should the shipment go to?";
+  }
+  if (!f.product) {
+    return `Got **${f.destination}** — what are you sending (product type or description)?`;
   }
   if (!f.min_packs && !f.max_packs) {
-    return "About how many packs or cartons per shipment — a rough min and max is fine.";
+    return `For **${f.product}** to **${f.destination}**, roughly how many packs or cartons per shipment?`;
   }
   if (!f.weight_or_size) {
-    return "Roughly how heavy or large is one pack?";
+    return "And roughly how heavy is one pack or carton?";
   }
   if (!f.frequency) {
-    return "How often do you plan to ship — weekly, monthly, or as needed?";
+    return "How often would you ship — weekly, monthly, or just when needed?";
   }
   if (!buffer?.contactPhone) {
-    return "What's the best mobile number to reach you on (e.g. 07… or 9477…)?";
+    return "What's the best mobile to reach you on for the quote (e.g. 07…)?";
   }
   return (
-    "Thanks — I have enough to pass this to our sales team for a proper quote.\n\n" +
-    "Reply **yes** or **done** and I'll submit it (you'll get an SMS)."
+    "Perfect — I'll pass this to our sales team for a proper quote.\n\n" +
+    "Reply **yes** or **done** when you're ready and I'll submit it (you'll get an SMS)."
   );
 }
 
