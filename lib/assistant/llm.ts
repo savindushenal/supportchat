@@ -693,15 +693,31 @@ export async function runLlmAssistant(options: {
   const ai = getGemini();
   if (!ai) return null;
 
-  try {
-    return await runGeminiInner(ai, options);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.warn("[assistant/llm] Falling back to rules:", message);
-    const wrapped = new Error(message);
-    (wrapped as Error & { geminiFailed: true }).geminiFailed = true;
-    throw wrapped;
+  const preferred = process.env.GEMINI_MODEL?.trim();
+  const models = [
+    preferred,
+    "gemini-2.0-flash",
+    "gemini-2.5-flash",
+    "gemini-flash-latest",
+  ].filter((m, i, arr): m is string => Boolean(m) && arr.indexOf(m) === i);
+
+  let lastError: unknown;
+  for (const model of models) {
+    try {
+      return await runGeminiInner(ai, options, model);
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[assistant/llm] Model ${model} failed:`, message);
+    }
   }
+
+  const message =
+    lastError instanceof Error ? lastError.message : String(lastError);
+  console.warn("[assistant/llm] Falling back to rules:", message);
+  const wrapped = new Error(message);
+  (wrapped as Error & { geminiFailed: true }).geminiFailed = true;
+  throw wrapped;
 }
 
 async function runGeminiInner(
@@ -712,9 +728,9 @@ async function runGeminiInner(
     callerPhone?: string | null;
     sessionToken?: string | null;
     supportState?: SupportState | null;
-  }
+  },
+  model: string
 ): Promise<AssistantResult> {
-  const model = process.env.GEMINI_MODEL?.trim() || "gemini-3.6-flash";
   let state: ToolState = {
     activeWaybill: options.currentWaybill,
     callerPhone: options.callerPhone ?? null,

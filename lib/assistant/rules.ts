@@ -518,7 +518,90 @@ export async function runRuleAssistant(
     };
   }
 
-  // Actions require verified session
+  // Sales / quote discovery BEFORE re-delivery shortcuts ("1"/"2")
+  // so answers like "1" (= one-time) never hit "Share or pick a waybill".
+  if (
+    supportState.inquiryBuffer &&
+    (looksLikePhone(message) || normalisePhoneTo94(message))
+  ) {
+    callerPhone = normalisePhoneTo94(message) || message;
+    const phoneBuf = {
+      ...supportState.inquiryBuffer!,
+      contactPhone: callerPhone,
+    };
+    supportState = {
+      ...supportState,
+      inquiryBuffer: phoneBuf,
+    };
+    const ready =
+      Boolean(phoneBuf.fields?.product) &&
+      Boolean(phoneBuf.fields?.destination) &&
+      Boolean(phoneBuf.fields?.min_packs || phoneBuf.fields?.max_packs);
+    return {
+      reply:
+        `Perfect, thanks — I'll use **${callerPhone}**.\n\n` +
+        nextSalesQuestion(phoneBuf),
+      ...base(),
+      suggestions: ready ? ["yes", "help"] : ["help"],
+    };
+  }
+
+  if (
+    supportState.inquiryBuffer &&
+    !isConversationClosing(normalized) &&
+    !isInquirySubmitIntent(normalized)
+  ) {
+    const fields = applySalesTurnFields(
+      supportState.inquiryBuffer.fields,
+      message
+    );
+
+    const midBuf = appendInquirySnippet(
+      supportState.inquiryBuffer,
+      message,
+      { contactPhone: callerPhone, priority: "high", fields }
+    );
+    supportState = {
+      ...supportState,
+      inquiryBuffer: midBuf,
+    };
+    return {
+      reply: nextSalesQuestion(midBuf),
+      ...base(),
+      suggestions:
+        fields.product &&
+        fields.destination &&
+        (fields.min_packs || fields.max_packs) &&
+        midBuf.contactPhone
+          ? ["yes", "help"]
+          : ["help"],
+    };
+  }
+
+  if (isRichSalesInquiry(normalized) || isBusinessInquiry(normalized)) {
+    const fields = applySalesTurnFields(null, message);
+
+    supportState = {
+      ...supportState,
+      inquiryBuffer: appendInquirySnippet(
+        supportState.inquiryBuffer,
+        message,
+        {
+          contactPhone: callerPhone,
+          priority: "high",
+          topic: "Business / export sales",
+          fields,
+        }
+      ),
+    };
+    return {
+      reply: salesDiscoveryFallbackReply(message, fields),
+      ...base(),
+      suggestions: ["help"],
+    };
+  }
+
+  // Actions require verified session (not during sales discovery)
   if (isRedelivery(normalized) || isHumanAgent(normalized)) {
     if (!currentWaybill) {
       return {
@@ -627,90 +710,6 @@ export async function runRuleAssistant(
   if (pricing) {
     return {
       reply: pricing,
-      ...base(),
-      suggestions: ["help"],
-    };
-  }
-
-  // Contact number while inquiry buffer open
-  if (
-    supportState.inquiryBuffer &&
-    (looksLikePhone(message) || normalisePhoneTo94(message))
-  ) {
-    callerPhone = normalisePhoneTo94(message) || message;
-    const phoneBuf = {
-      ...supportState.inquiryBuffer!,
-      contactPhone: callerPhone,
-    };
-    supportState = {
-      ...supportState,
-      inquiryBuffer: phoneBuf,
-    };
-    const ready =
-      Boolean(phoneBuf.fields?.product) &&
-      Boolean(phoneBuf.fields?.destination) &&
-      Boolean(phoneBuf.fields?.min_packs || phoneBuf.fields?.max_packs);
-    return {
-      reply:
-        `Perfect, thanks — I'll use **${callerPhone}**.\n\n` +
-        nextSalesQuestion(phoneBuf),
-      ...base(),
-      suggestions: ready ? ["yes", "help"] : ["help"],
-    };
-  }
-
-  // Mid sales chat (Gemini unavailable) — keep one-question conversation
-  if (
-    supportState.inquiryBuffer &&
-    !isConversationClosing(normalized) &&
-    !isInquirySubmitIntent(normalized)
-  ) {
-    const fields = applySalesTurnFields(
-      supportState.inquiryBuffer.fields,
-      message
-    );
-
-    const midBuf = appendInquirySnippet(
-      supportState.inquiryBuffer,
-      message,
-      { contactPhone: callerPhone, priority: "high", fields }
-    );
-    supportState = {
-      ...supportState,
-      inquiryBuffer: midBuf,
-    };
-    return {
-      reply: nextSalesQuestion(midBuf),
-      ...base(),
-      suggestions:
-        fields.product &&
-        fields.destination &&
-        (fields.min_packs || fields.max_packs) &&
-        midBuf.contactPhone
-          ? ["yes", "help"]
-          : ["help"],
-    };
-  }
-
-  // First rich business/export message — warm opener, one question
-  if (isRichSalesInquiry(normalized) || isBusinessInquiry(normalized)) {
-    const fields = applySalesTurnFields(null, message);
-
-    supportState = {
-      ...supportState,
-      inquiryBuffer: appendInquirySnippet(
-        supportState.inquiryBuffer,
-        message,
-        {
-          contactPhone: callerPhone,
-          priority: "high",
-          topic: "Business / export sales",
-          fields,
-        }
-      ),
-    };
-    return {
-      reply: salesDiscoveryFallbackReply(message, fields),
       ...base(),
       suggestions: ["help"],
     };
@@ -1019,14 +1018,16 @@ export function shouldSkipLlm(
   if (!normalized) return true;
   if (isGreeting(normalized) || isHelp(normalized)) return true;
 
-  // Active sales chat must stay with Gemini / inquiry rules — never "out of scope"
+  // Active sales chat must stay with Gemini — never skip for "1"/"2" shortcuts
   if (state.inquiryBuffer || isActiveSalesConversation(history)) {
     if (isConversationClosing(normalized)) return true;
     if (looksLikePhone(message) || normalisePhoneTo94(message)) return true;
+    if (isInquirySubmitIntent(normalized)) return true;
     return false;
   }
 
   if (isOffTopic(message) || isOutOfScopeChat(message, normalized, history)) return true;
+  // Bare "1"/"2" only skip LLM when NOT in a sales chat (handled above)
   if (isRedelivery(normalized) || isHumanAgent(normalized)) return true;
   if (/^(otp|send\s*otp|verify|resend)/i.test(normalized)) return true;
   if (/^\d{6}$/.test(message.trim())) return true;

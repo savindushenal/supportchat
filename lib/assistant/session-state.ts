@@ -231,6 +231,21 @@ const EXPORT_COUNTRY_ALIASES: Record<string, string> = {
   thailand: "Thailand",
   vietnam: "Vietnam",
   indonesia: "Indonesia",
+  // Domestic Sri Lanka destinations
+  kandy: "Kandy, Sri Lanka",
+  colombo: "Colombo, Sri Lanka",
+  galle: "Galle, Sri Lanka",
+  matara: "Matara, Sri Lanka",
+  jaffna: "Jaffna, Sri Lanka",
+  negombo: "Negombo, Sri Lanka",
+  gampaha: "Gampaha, Sri Lanka",
+  kurunegala: "Kurunegala, Sri Lanka",
+  anuradhapura: "Anuradhapura, Sri Lanka",
+  batticaloa: "Batticaloa, Sri Lanka",
+  trincomalee: "Trincomalee, Sri Lanka",
+  ratnapura: "Ratnapura, Sri Lanka",
+  badulla: "Badulla, Sri Lanka",
+  "nuwara eliya": "Nuwara Eliya, Sri Lanka",
 };
 
 /** Common typos / near-misses for country codes (keyboard neighbors). */
@@ -322,13 +337,8 @@ function extractVolumeFields(n: string): {
   if (packsSingle) {
     return { min_packs: packsSingle[1], max_packs: packsSingle[1] };
   }
-  // Bare quantity answers: "10", "about 10", "~10"
-  const bare = n.match(
-    /^(?:about|around|approx(?:imately)?|roughly|nearly|~)?\s*(\d{1,4})\s*(?:pcs|x)?\.?$/i
-  );
-  if (bare) {
-    return { min_packs: bare[1], max_packs: bare[1] };
-  }
+  // Bare numbers like "10" / "1" are handled in applySalesTurnFields
+  // (context-aware: volume vs one-time frequency).
   return {};
 }
 
@@ -514,7 +524,41 @@ export function applySalesTurnFields(
           min_packs: volume.min_packs,
           max_packs: volume.max_packs || volume.min_packs,
         };
+      } else {
+        const bare = n.match(
+          /^(?:about|around|approx(?:imately)?|roughly|nearly|~)?\s*(\d{1,4})\s*(?:pcs|x)?\.?$/i
+        );
+        if (bare) {
+          fields = {
+            ...fields,
+            min_packs: bare[1],
+            max_packs: bare[1],
+          };
+        }
       }
+    }
+  }
+
+  // Frequency answers — including bare "1" meaning one-time (NOT re-delivery)
+  if (!fields.frequency) {
+    const n = message.toLowerCase().trim();
+    const packsAlreadyKnown = Boolean(
+      known?.min_packs || known?.max_packs || fields.min_packs || fields.max_packs
+    );
+    if (
+      /^(once|one[\s-]?time|just\s*once|single\s*time|one\s*off|one-off)$/i.test(
+        n
+      ) ||
+      (packsAlreadyKnown && /^(1|one)$/i.test(n))
+    ) {
+      fields = { ...fields, frequency: "one-time" };
+    } else if (
+      /\b(weekly|monthly|daily|as\s*needed|occasionally|regular|often)\b/i.test(n)
+    ) {
+      const freq = n.match(
+        /\b(weekly|monthly|daily|as\s*needed|occasionally|regular|often)\b/i
+      );
+      if (freq) fields = { ...fields, frequency: freq[1] };
     }
   }
 
@@ -569,7 +613,7 @@ export function isActiveSalesConversation(
     if (!t?.text) continue;
     const text = t.text.toLowerCase();
     if (
-      /\b(export|new\s*zealand|\bnz\b|australia|cinnamon|kurundu|best\s*quote|competitive\s*export|per\s*shipment|how\s*many\s*(packs?|packages?|cartons?)|how\s*much\s*weight|sales\s*team|quote|packages?\s*do\s*you|send\s*(a\s+)?(package|parcel)|ship\s*to|want\s*(to\s+)?send|what\s*(product|are you sending))\b/i.test(
+      /\b(export|new\s*zealand|\bnz\b|kandy|colombo|australia|cinnamon|kurundu|best\s*quote|competitive\s*export|per\s*shipment|how\s*many\s*(packs?|packages?|cartons?|parcels?)|how\s*much\s*weight|roughly how heavy|sales\s*team|quote|packages?\s*do\s*you|send\s*(a\s+)?(package|parcel)|ship\s*to|want\s*(to\s+)?send|what\s*(product|are you sending)|one-time send)\b/i.test(
         text
       )
     ) {
