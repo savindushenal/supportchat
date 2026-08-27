@@ -233,11 +233,110 @@ const EXPORT_COUNTRY_ALIASES: Record<string, string> = {
   indonesia: "Indonesia",
 };
 
+/** Common typos / near-misses for country codes (keyboard neighbors). */
+const COUNTRY_CODE_TYPOS: Record<string, string> = {
+  nx: "nz",
+  mz: "nz",
+  ns: "nz",
+  nq: "nz",
+  na: "nz",
+  ay: "au",
+  ai: "au",
+  auy: "au",
+  uj: "uk",
+  uh: "uk",
+  yk: "uk",
+  ys: "us",
+  uz: "us",
+  ua: "us",
+};
+
+const UNIT_WORDS =
+  "packs?|packages?|parcels?|cartons?|boxes|envelopes?|sets?|pieces?|items?|pcs";
+
+function resolveDestinationLabel(raw: string): string | null {
+  const key = raw.trim().toLowerCase().replace(/\s+/g, " ");
+  if (!key) return null;
+  if (EXPORT_COUNTRY_ALIASES[key]) return EXPORT_COUNTRY_ALIASES[key];
+  const typo = COUNTRY_CODE_TYPOS[key];
+  if (typo && EXPORT_COUNTRY_ALIASES[typo]) return EXPORT_COUNTRY_ALIASES[typo];
+  // Fuzzy: 1-char edit distance against known 2–3 letter codes
+  if (/^[a-z]{2,3}$/.test(key)) {
+    const shortKeys = Object.keys(EXPORT_COUNTRY_ALIASES).filter(
+      (k) => k.length >= 2 && k.length <= 3 && !k.includes(" ")
+    );
+    let best: string | null = null;
+    let bestDist = 99;
+    for (const k of shortKeys) {
+      const d = editDistance(key, k);
+      if (d < bestDist) {
+        bestDist = d;
+        best = k;
+      }
+    }
+    if (best && bestDist === 1) return EXPORT_COUNTRY_ALIASES[best];
+  }
+  return null;
+}
+
+function editDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  const row = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    let prev = row[0];
+    row[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const tmp = row[j];
+      row[j] =
+        a[i - 1] === b[j - 1]
+          ? prev
+          : 1 + Math.min(prev, row[j], row[j - 1]);
+      prev = tmp;
+    }
+  }
+  return row[b.length];
+}
+
+function extractVolumeFields(n: string): {
+  min_packs?: string;
+  max_packs?: string;
+} {
+  const unit = UNIT_WORDS;
+  const packsRange = n.match(
+    new RegExp(
+      `(\\d+)\\s*(?:to|-|–)\\s*(\\d+)\\s*(?:${unit})?`,
+      "i"
+    )
+  );
+  if (packsRange) {
+    return { min_packs: packsRange[1], max_packs: packsRange[2] };
+  }
+  const packsSingle = n.match(
+    new RegExp(
+      `\\b(?:about|around|approx(?:imately)?|roughly|nearly|~)?\\s*(\\d+)\\s*(?:${unit})\\b`,
+      "i"
+    )
+  );
+  if (packsSingle) {
+    return { min_packs: packsSingle[1], max_packs: packsSingle[1] };
+  }
+  // Bare quantity answers: "10", "about 10", "~10"
+  const bare = n.match(
+    /^(?:about|around|approx(?:imately)?|roughly|nearly|~)?\s*(\d{1,4})\s*(?:pcs|x)?\.?$/i
+  );
+  if (bare) {
+    return { min_packs: bare[1], max_packs: bare[1] };
+  }
+  return {};
+}
+
 const EXPORT_PRODUCT_WORDS =
   /\b(kurundu|cinnamon|tea|spice|spices|garment|apparel|coconut|rubber|gems?|jewellery|jewelry|handicrafts?|cosmetics?|snacks?|food\s*items?|documents?|docs|papers?|paperwork|clothing|clothes|personal\s*goods?|personal\s*items?|electronics?|gifts?|samples?|medicines?|pharma|books?)\b/i;
 
 const PRODUCT_REJECT =
-  /^(yes|y|no|n|ok|okay|done|thanks|thank you|help|hi|hello|otp|nz|uk|usa|au)$/i;
+  /^(yes|y|no|n|ok|okay|done|thanks|thank you|help|hi|hello|otp|nz|nx|uk|usa|au)$/i;
 
 const DESTINATION_STOP_WORDS = new Set([
   "send",
@@ -292,35 +391,33 @@ export function extractInquiryFieldsFromText(text: string): Record<string, strin
       if (!m?.[1]) continue;
       const candidate = m[1].trim().toLowerCase();
       if (DESTINATION_STOP_WORDS.has(candidate)) continue;
-      const resolved = EXPORT_COUNTRY_ALIASES[candidate];
+      const resolved = resolveDestinationLabel(candidate);
       if (resolved) {
         fields.destination = resolved;
-        break;
-      }
-      if (/^[a-z]{2,3}$/.test(candidate)) {
-        fields.destination = candidate.toUpperCase();
         break;
       }
     }
   }
 
-  const packsRange = n.match(
-    /(\d+)\s*(?:to|-|–)\s*(\d+)\s*(packs?|packages?|cartons?|boxes)?/i
-  );
-  const packsSingle = n.match(
-    /\b(?:about|around|approx(?:imately)?)?\s*(\d+)\s*(packs?|packages?|cartons?|boxes)\b/i
-  );
-  const weight = n.match(/\b(\d+(?:\.\d+)?)\s*(kg|kgs|kilograms?)\b/i);
-  if (packsRange) {
-    fields.min_packs = packsRange[1];
-    fields.max_packs = packsRange[2];
-  } else if (packsSingle) {
-    fields.min_packs = packsSingle[1];
-    fields.max_packs = packsSingle[1];
+  // Standalone country / typo replies: "nz", "nx", "australia"
+  if (!fields.destination) {
+    const alone = n.replace(/[.!?]+$/g, "").trim();
+    const resolvedAlone = resolveDestinationLabel(alone);
+    if (resolvedAlone) fields.destination = resolvedAlone;
   }
+
+  const volume = extractVolumeFields(n);
+  if (volume.min_packs) fields.min_packs = volume.min_packs;
+  if (volume.max_packs) fields.max_packs = volume.max_packs;
+
+  const weight = n.match(/\b(\d+(?:\.\d+)?)\s*(kg|kgs|kilograms?)\b/i);
   if (weight) fields.weight_or_size = `${weight[1]} ${weight[2]}`;
-  const freq = n.match(/\b(weekly|monthly|daily|as\s*needed|occasionally)\b/i);
-  if (freq) fields.frequency = freq[1];
+  const freq = n.match(
+    /\b(weekly|monthly|daily|as\s*needed|occasionally|one[\s-]?time|once)\b/i
+  );
+  if (freq) {
+    fields.frequency = /one|once/i.test(freq[1]) ? "one-time" : freq[1];
+  }
 
   return fields;
 }
@@ -395,7 +492,7 @@ export function applySalesTurnFields(
       if (product) fields = { ...fields, product };
     }
   }
-  // Single-piece docs/parcels: treat "1" / "one" as volume when packs still missing
+  // Volume follow-ups when product + destination known
   if (
     fields.product &&
     fields.destination &&
@@ -409,7 +506,22 @@ export function applySalesTurnFields(
         min_packs: "1",
         max_packs: /\bfew\b/i.test(n) ? "5" : "1",
       };
+    } else {
+      const volume = extractVolumeFields(n);
+      if (volume.min_packs) {
+        fields = {
+          ...fields,
+          min_packs: volume.min_packs,
+          max_packs: volume.max_packs || volume.min_packs,
+        };
+      }
     }
+  }
+
+  // Normalize bad stored destinations like "NX" from older turns
+  if (fields.destination) {
+    const fixed = resolveDestinationLabel(fields.destination);
+    if (fixed) fields = { ...fields, destination: fixed };
   }
   return fields;
 }
@@ -626,6 +738,14 @@ export function salesReplyIgnoresKnownFields(
   if (
     fields.destination &&
     /\b(which country|what country|where (are you|do you want to) (send|ship)|destination)\b/i.test(
+      r
+    )
+  ) {
+    return true;
+  }
+  if (
+    (fields.min_packs || fields.max_packs) &&
+    /\b(how many|roughly how many|packs or parcels|packs or cartons|envelopes or sets)\b/i.test(
       r
     )
   ) {
