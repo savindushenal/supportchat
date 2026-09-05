@@ -150,10 +150,10 @@ export async function runRuleAssistant(
   if (!message && !options.flushInquiries) {
     return {
       reply:
-        "Hi — how can I help with your TransExpress shipment?\n\n" +
-        "Share a **waybill** or **phone number** and I'll look it up.",
+        "Hi — I'm here to help with TransExpress support.\n\n" +
+        "What do you need today — tracking, re-delivery, invoices, a complaint, or a quote?",
       ...base(),
-      suggestions: [],
+      suggestions: ["help"],
     };
   }
 
@@ -161,9 +161,8 @@ export async function runRuleAssistant(
     return {
       reply:
         "Hi! I'm the TransExpress support agent.\n\n" +
-        "Share a **waybill** or **phone number** and I'll look it up — " +
-        "I'll text a short verification code when you need full journey details.\n\n" +
-        "Or type **help** anytime.",
+        "How can I help you today?\n" +
+        "Tracking, re-delivery, invoices, a complaint, shipping quote — just tell me what you need.",
       ...base(),
       suggestions: ["help"],
     };

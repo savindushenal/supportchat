@@ -48,9 +48,8 @@ const EMPTY_SUPPORT: SupportState = {
 
 const INITIAL_BOT_MESSAGE =
   "Hi! I'm the **TransExpress support agent**.\n\n" +
-  "Share a **waybill** or **phone number** and I'll look it up.\n" +
-  "When you need the full journey, I'll text a short code — just reply with the digits.\n\n" +
-  "Or type **help** anytime.";
+  "How can I help you today — tracking, re-delivery, invoices, a complaint, or a shipping quote?\n\n" +
+  "Just tell me what you need (or type **help**).";
 
 /**
  * Floating support agent — waybill/phone → OTP → verified journey.

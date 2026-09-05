@@ -14,22 +14,21 @@ export default function Home() {
           Fast, Reliable, Delivered with Care
         </p>
         <p className="max-w-xl text-lg leading-relaxed text-slate-600">
-          Open the support agent for shipment help — send a waybill or phone,
-          get a short SMS code for the full journey, request re-delivery, or
-          reach customer care.
+          Open the support agent for help with tracking, re-delivery, invoices,
+          complaints, shipping quotes, or customer care.
         </p>
         <ul className="mt-4 space-y-2 text-slate-600">
           <li className="flex items-start gap-2">
             <span className="mt-1 text-blue-500">✓</span>
-            Track by waybill or phone (sender or receiver)
+            Ask how we can help — tracking is only one option
           </li>
           <li className="flex items-start gap-2">
             <span className="mt-1 text-blue-500">✓</span>
-            SMS code unlocks warehouse → dispatch → delivery timeline
+            Re-delivery, invoices, complaints, and export quotes
           </li>
           <li className="flex items-start gap-2">
             <span className="mt-1 text-blue-500">✓</span>
-            Re-delivery or human agent after a quick SMS check
+            Quick SMS check when full journey details are needed
           </li>
         </ul>
         <p className="mt-8 text-sm text-slate-500">
