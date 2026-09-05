@@ -24,10 +24,16 @@ export type InquiryBuffer = {
 export type SupportState = {
   complaintDraft: ComplaintDraft | null;
   inquiryBuffer: InquiryBuffer | null;
+  /** After OTP, continue this action (e.g. invoices + PDF) without another ask. */
+  pendingAfterOtp?: "invoices" | "journey" | null;
 };
 
 export function emptySupportState(): SupportState {
-  return { complaintDraft: null, inquiryBuffer: null };
+  return {
+    complaintDraft: null,
+    inquiryBuffer: null,
+    pendingAfterOtp: null,
+  };
 }
 
 export function parseSupportState(raw: unknown): SupportState {
@@ -76,7 +82,11 @@ export function parseSupportState(raw: unknown): SupportState {
     }
   }
 
-  return { complaintDraft, inquiryBuffer };
+  const pendingRaw = o.pendingAfterOtp;
+  const pendingAfterOtp =
+    pendingRaw === "invoices" || pendingRaw === "journey" ? pendingRaw : null;
+
+  return { complaintDraft, inquiryBuffer, pendingAfterOtp };
 }
 
 /** Recover draft from the last bot “raise this complaint” message (if client state was lost). */
@@ -581,8 +591,146 @@ export function mergeInquiryFields(
   return merged;
 }
 
+/**
+ * Shipment status / tracking ask — NOT a sales quote.
+ * Catches "update", "any update", "where is my parcel", etc.
+ */
+export function isShipmentUpdateIntent(normalized: string): boolean {
+  const t = normalized.toLowerCase().replace(/\s+/g, " ").trim();
+  if (!t) return false;
+  // Explicit sales send/ship wins over update wording
+  if (
+    /\b(want|wanna|need|like|plan|planning)\s+(to\s+)?(send|ship|export|deliver|post|mail)\b/i.test(
+      t
+    )
+  ) {
+    return false;
+  }
+  if (
+    /\b(send|ship|export)\s+(a\s+|my\s+|the\s+)?(package|parcel|goods?|item|product|shipment)\b/i.test(
+      t
+    )
+  ) {
+    return false;
+  }
+  if (
+    /^(any\s*)?(update|updates|status|track|tracking)([?!.]*)$/i.test(t)
+  ) {
+    return true;
+  }
+  if (
+    /\b(any\s+)?(update|updates)\b/i.test(t) ||
+    /\b(status\s*update|delivery\s*status|order\s*status|shipment\s*status)\b/i.test(
+      t
+    ) ||
+    /\b(where\s+is|where's)\s+(my\s+)?(parcel|package|order|shipment|courier|delivery)\b/i.test(
+      t
+    ) ||
+    /\b(track|tracking|check)\s+(my\s+)?(parcel|package|order|shipment|waybill|delivery)\b/i.test(
+      t
+    ) ||
+    /\b(is\s+(my\s+)?(parcel|package|order|shipment)\s+(here|there|delivered|coming|arrived))\b/i.test(
+      t
+    )
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Typos / near-miss greetings: helo, hii, helllo, heyoo, gm, etc.
+ */
+export function isGreetingMessage(normalized: string): boolean {
+  const t = normalized.toLowerCase().replace(/\s+/g, " ").trim();
+  if (!t) return false;
+  if (
+    /^(hi|hii+|hiii+|hello|helo|hell+o+|halo|hallo|hey|heyy+|he+\s*yo|yo|yoo+|hiya|howdy|sup|ayo|hola|hai|helo+|helllo+)\b[!?.]*$/.test(
+      t
+    )
+  ) {
+    return true;
+  }
+  if (
+    /^(good\s*(morning|afternoon|evening|night)|gud\s*(morning|afternoon|evening|night)|gm|ga|ge)\b[!?.]*$/.test(
+      t
+    )
+  ) {
+    return true;
+  }
+  // Very short typo greetings (edit distance–ish via known misspellings)
+  const token = t.replace(/[!?.]+$/g, "");
+  const greetingAliases = new Set([
+    "hi",
+    "hii",
+    "hiii",
+    "hello",
+    "helo",
+    "helllo",
+    "helloo",
+    "helol",
+    "helli",
+    "hey",
+    "heyy",
+    "heyyy",
+    "hai",
+    "halo",
+    "hallo",
+    "yo",
+    "yoo",
+    "hiya",
+    "ayo",
+    "hola",
+    "gm",
+    "ga",
+    "ge",
+    "morning",
+    "evening",
+  ]);
+  if (greetingAliases.has(token)) return true;
+  // Single-token close to "hello" / "hey" (length 2–8)
+  if (/^[a-z]{2,8}$/.test(token)) {
+    if (fuzzyNear(token, "hello") || fuzzyNear(token, "hey") || fuzzyNear(token, "hi")) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function fuzzyNear(a: string, b: string): boolean {
+  if (a === b) return true;
+  // Allow 1 edit for short words, 2 for longer
+  const max = b.length <= 3 ? 1 : 2;
+  if (Math.abs(a.length - b.length) > max) return false;
+  return levenshtein(a, b) <= max;
+}
+
+function levenshtein(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  const dp: number[][] = Array.from({ length: m + 1 }, () =>
+    Array(n + 1).fill(0)
+  );
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1,
+        dp[i][j - 1] + 1,
+        dp[i - 1][j - 1] + cost
+      );
+    }
+  }
+  return dp[m][n];
+}
+
 /** Export, bulk, corporate, international — needs multi-turn Gemini discovery. */
 export function isRichSalesInquiry(normalized: string): boolean {
+  // Tracking / status updates must never start a sales quote
+  if (isShipmentUpdateIntent(normalized)) return false;
+
   if (
     /\b(want|wanna|need|like|plan|planning)\s+(to\s+)?(send|ship|export|deliver|post|mail)\b/i.test(
       normalized
@@ -597,7 +745,8 @@ export function isRichSalesInquiry(normalized: string): boolean {
   ) {
     return true;
   }
-  return /\b(export|import|international|overseas|new\s*zealand|\bnz\b|australia|aussie|usa|uk|canada|dubai|middle\s*east|europe|singapore|malaysia|bulk|corporate|b2b|business|company|partnership|contract|wholesale|shipment\s*to|ship\s*to|kurundu|cinnamon|tea|spice|cargo|freight|consignment\s*to|best\s*rate|special\s*rate|volume|packs?|packages?|parcels?|cartons?|pallets?|boxes|\d+\s*kg|kilograms?)\b/i.test(
+  // Require clear sales/export signals — NOT bare "parcel/package/update"
+  return /\b(export|import|international|overseas|new\s*zealand|\bnz\b|australia|aussie|usa|uk|canada|dubai|middle\s*east|europe|singapore|malaysia|bulk|corporate|b2b|business\s*(account|rate|quote|inquiry|enquiry)?|company\s*(rate|account|quote)|partnership|contract|wholesale|shipment\s*to|ship\s*to|kurundu|cinnamon|tea\s*(export|ship)|spice\s*(export|ship)|cargo|freight|consignment\s*to|best\s*rate|special\s*rate|quotation|quote\s*(for|to)|how\s*much\s*(to\s*)?(send|ship|export))\b/i.test(
     normalized
   );
 }
@@ -611,9 +760,26 @@ export function isActiveSalesConversation(
   for (let i = recent.length - 1; i >= 0; i--) {
     const t = recent[i];
     if (!t?.text) continue;
-    const text = t.text.toLowerCase();
+    const text = t.text.toLowerCase().replace(/\s+/g, " ").trim();
+    // Bare menu words alone are NOT an active sales chat
     if (
-      /\b(export|new\s*zealand|\bnz\b|kandy|colombo|australia|cinnamon|kurundu|best\s*quote|competitive\s*export|per\s*shipment|how\s*many\s*(packs?|packages?|cartons?|parcels?)|how\s*much\s*weight|roughly how heavy|sales\s*team|quote|packages?\s*do\s*you|send\s*(a\s+)?(package|parcel)|ship\s*to|want\s*(to\s+)?send|what\s*(product|are you sending)|one-time send)\b/i.test(
+      /^(quote|quotation|pricing|rates?|help|track|tracking|invoices?|re[\s-]?deliver(y)?)$/i.test(
+        text
+      )
+    ) {
+      continue;
+    }
+    if (
+      /\b(export|new\s*zealand|\bnz\b|kandy|colombo|australia|cinnamon|kurundu|best\s*quote|competitive\s*export|per\s*shipment|how\s*many\s*(packs?|packages?|cartons?|parcels?)|how\s*much\s*weight|roughly how heavy|sales\s*team|packages?\s*do\s*you|send\s*(a\s+)?(package|parcel)|ship\s*to|want\s*(to\s+)?send|what\s*(product|are you sending)|one-time send|documents?\s+to|gifts?\s+to)\b/i.test(
+        text
+      )
+    ) {
+      return true;
+    }
+    // Multi-turn quote chat: bot asked destination/product and user answered
+    if (
+      t.role === "bot" &&
+      /\b(which country|what are you sending|how many packs|shipping quote|export options)\b/i.test(
         text
       )
     ) {
@@ -715,7 +881,18 @@ export function salesDiscoveryFallbackReply(
       `Which country should it go to?`
     );
   }
-  if (/\b(send|ship|export|deliver|post|mail|courier|package|parcel)\b/i.test(n)) {
+  if (isShipmentUpdateIntent(n)) {
+    return (
+      "Happy to check that for you.\n\n" +
+      "Please share your **waybill** or the **phone number** on the shipment."
+    );
+  }
+  if (
+    /\b(want|wanna|need|like)\s+(to\s+)?(send|ship|export)\b/i.test(n) ||
+    /\b(send|ship|export|deliver|post|mail|courier)\s+(a\s+|my\s+|the\s+)?(package|parcel|goods?)\b/i.test(
+      n
+    )
+  ) {
     return (
       `Sure, I can help with that.\n\n` +
       `Which country are you sending to?`

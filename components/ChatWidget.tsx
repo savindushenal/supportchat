@@ -20,6 +20,7 @@ type SupportState = {
     topic: string | null;
     fields?: Record<string, string>;
   } | null;
+  pendingAfterOtp?: "invoices" | "journey" | null;
 };
 
 type Message = {
@@ -42,12 +43,13 @@ type ChatApiResponse = {
 const EMPTY_SUPPORT: SupportState = {
   complaintDraft: null,
   inquiryBuffer: null,
+  pendingAfterOtp: null,
 };
 
 const INITIAL_BOT_MESSAGE =
   "Hi! I'm the **TransExpress support agent**.\n\n" +
-  "Senders and receivers can track consignments. Full journey details need **SMS OTP**.\n\n" +
-  "Share a **waybill** or **contact number** — or type **help**.";
+  "How can I help you today — tracking, re-delivery, invoices, a complaint, or a shipping quote?\n\n" +
+  "Just tell me what you need (or type **help**).";
 
 /**
  * Floating support agent — waybill/phone → OTP → verified journey.
@@ -64,7 +66,13 @@ export default function ChatWidget() {
   const [sessionToken, setSessionToken] = useState<string | null>(null);
   const [supportState, setSupportState] =
     useState<SupportState>(EMPTY_SUPPORT);
-  const [suggestions, setSuggestions] = useState<string[]>(["help"]);
+  const [suggestions, setSuggestions] = useState<string[]>([
+    "track",
+    "re-delivery",
+    "invoices",
+    "quote",
+    "help",
+  ]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -201,16 +209,18 @@ export default function ChatWidget() {
     if (value === "1") return "1 · Re-delivery";
     if (value === "2") return "2 · Human agent";
     if (value === "help") return "Help";
-    if (value.toUpperCase() === "OTP") return "Send OTP";
+    if (value === "track") return "Track shipment";
+    if (value === "re-delivery") return "Re-delivery";
+    if (value === "invoices") return "Invoices";
+    if (value === "quote") return "Shipping quote";
+    if (value.toUpperCase() === "OTP") return "Resend code";
     if (value === "pending pdf") return "Pending PDF";
     if (value === "paid pdf") return "Paid PDF";
     if (value === "pending invoices") return "Pending invoices";
     if (value === "complaint status") return "Complaint status";
-    if (value === "yes") return "Yes · Raise complaint";
+    if (value === "yes") return "Yes · Confirm";
     if (value === "no") return "No · Cancel";
     if (value === "done") return "Yes · Submit inquiry";
-    if (value === "yes") return "Yes · Submit";
-    if (value === "no") return "No · Cancel";
     return value;
   }
 
@@ -379,10 +389,10 @@ export default function ChatWidget() {
               onChange={(e) => setInput(e.target.value)}
               placeholder={
                 currentWaybill && !verified
-                  ? "OTP code, or ask…"
+                  ? "Enter the 6-digit SMS code…"
                   : verified
-                    ? "1, 2, or ask about journey…"
-                    : "Waybill / phone / ask…"
+                    ? "Ask about journey, or 1 / 2…"
+                    : "Waybill, phone, or ask…"
               }
               disabled={isLoading}
               className="flex-1 rounded-full border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-blue-400 focus:bg-white focus:ring-2 focus:ring-blue-100 disabled:opacity-60"

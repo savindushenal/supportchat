@@ -24,8 +24,43 @@ function generateCode(): string {
 }
 
 export type SendOtpResult =
-  | { ok: true; maskedPhone: string; expiresAt: string }
+  | { ok: true; maskedPhone: string; expiresAt: string; alreadySent?: boolean }
   | { ok: false; error: string };
+
+/**
+ * Send SMS code, or reuse an unexpired one if rate-limited.
+ * Prefer this for auto-send so users are not told to "type OTP to get OTP".
+ */
+export async function ensureTrackingOtp(options: {
+  phone: string;
+  waybill: string;
+}): Promise<SendOtpResult> {
+  const phone94 = normalisePhoneTo94(options.phone);
+  if (!phone94) return { ok: false, error: "Invalid phone number." };
+
+  const waybill = options.waybill.trim().toUpperCase();
+  if (!waybill) return { ok: false, error: "Waybill required." };
+
+  const sent = await sendTrackingOtp({ phone: phone94, waybill });
+  if (sent.ok) return sent;
+
+  // Rate-limited but a live code exists → treat as already sent (don't ask user to tap OTP)
+  const recent = await findRecentOtp(phone94, waybill);
+  if (
+    recent &&
+    !recent.consumed_at &&
+    new Date(recent.expires_at).getTime() > Date.now()
+  ) {
+    return {
+      ok: true,
+      maskedPhone: maskPhone(phone94),
+      expiresAt: recent.expires_at,
+      alreadySent: true,
+    };
+  }
+
+  return sent;
+}
 
 export async function sendTrackingOtp(options: {
   phone: string;
@@ -40,7 +75,8 @@ export async function sendTrackingOtp(options: {
   if (await isOtpRateLimited(phone94, 60)) {
     return {
       ok: false,
-      error: "Please wait about a minute before requesting another code.",
+      error:
+        "A code was just sent — wait about a minute before resending, or reply with the 6-digit code from SMS.",
     };
   }
 
@@ -99,16 +135,28 @@ export async function verifyTrackingOtp(options: {
 
   const row = await findRecentOtp(phone94, waybill);
   if (!row) {
-    return { ok: false, error: "No active code. Request a new OTP." };
+    return {
+      ok: false,
+      error: "No active code yet. Tap **Resend code** and I'll text you a new one.",
+    };
   }
   if (row.consumed_at) {
-    return { ok: false, error: "Code already used. Request a new OTP." };
+    return {
+      ok: false,
+      error: "That code was already used. Tap **Resend code** for a fresh one.",
+    };
   }
   if (new Date(row.expires_at).getTime() < Date.now()) {
-    return { ok: false, error: "Code expired. Request a new OTP." };
+    return {
+      ok: false,
+      error: "That code expired. Tap **Resend code** and I'll send a new one.",
+    };
   }
   if (row.code_hash !== hashSecret(code)) {
-    return { ok: false, error: "Invalid code. Try again." };
+    return {
+      ok: false,
+      error: "That code doesn't match. Check the SMS and try again.",
+    };
   }
 
   await consumeOtp(row.id);

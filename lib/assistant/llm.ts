@@ -17,18 +17,8 @@ import {
   requestRedelivery,
   updateOrderAction,
 } from "@/lib/supabase";
-import { hashSecret, sendTrackingOtp, verifyTrackingOtp } from "@/lib/otp";
+import { hashSecret, ensureTrackingOtp, verifyTrackingOtp } from "@/lib/otp";
 import { buildSystemPrompt } from "@/lib/assistant/prompt";
-import {
-  formatComplaintsReply,
-  formatInvoiceSummaryReply,
-  formatJourneyReply,
-  formatMaskedOrdersReply,
-  formatMaskedSingleReply,
-  formatOtpSentReply,
-  summarizeOrderForTool,
-} from "@/lib/assistant/format";
-import { normalisePhoneTo94 } from "@/lib/sms/notifylk";
 import {
   appendInquirySnippet,
   applySalesTurnFields,
@@ -36,6 +26,7 @@ import {
   inquiryContextForPrompt,
   isActiveSalesConversation,
   isRichSalesInquiry,
+  isShipmentUpdateIntent,
   nextSalesQuestion,
   organizeComplaintText,
   parseSupportState,
@@ -44,6 +35,19 @@ import {
   salesReplyIgnoresKnownFields,
   type SupportState,
 } from "@/lib/assistant/session-state";
+import {
+  formatComplaintsReply,
+  formatInvoiceSummaryReply,
+  formatJourneyReply,
+  formatMaskedOrdersReply,
+  formatNeedVerifyThenAction,
+  formatOtpSentReply,
+  formatPdfReadyReply,
+  formatShipmentCodeSendFailed,
+  formatShipmentWithCodeSent,
+  summarizeOrderForTool,
+} from "@/lib/assistant/format";
+import { normalisePhoneTo94 } from "@/lib/sms/notifylk";
 
 export type ChatTurn = {
   role: "user" | "bot";
@@ -71,7 +75,7 @@ const functionDeclarations: FunctionDeclaration[] = [
   {
     name: "lookup_orders",
     description:
-      "Find active orders by waybill or phone (sender or receiver). Returns masked summaries.",
+      "Find active orders by waybill or phone (sender or receiver). For a single match, automatically texts an SMS verification code — then ask the user only for the 6-digit code (never ask them to type OTP).",
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -85,7 +89,8 @@ const functionDeclarations: FunctionDeclaration[] = [
   },
   {
     name: "request_otp",
-    description: "Send SMS OTP to unlock full journey for a waybill.",
+    description:
+      "Resend SMS verification code for a waybill. Prefer lookup_orders first — it auto-sends. Only call this when the user asks to resend.",
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -243,9 +248,10 @@ function suggestionsFor(
   inquiryReady?: boolean
 ): string[] {
   if (inquiryActive) return inquiryReady ? ["done", "help"] : ["help"];
-  if (waybill && !verified && /otp/i.test(reply)) return ["OTP", "help"];
   if (waybill && verified) return ["1", "2", "help"];
-  if (waybill) return ["OTP", "help"];
+  // After auto-send / awaiting code — offer resend only
+  if (waybill && !verified) return ["OTP", "help"];
+  void reply;
   return ["help"];
 }
 
@@ -273,7 +279,12 @@ async function runTool(
   name: string,
   args: Record<string, unknown>,
   state: ToolState
-): Promise<{ result: string; state: ToolState; replyOverride?: string }> {
+): Promise<{
+  result: string;
+  state: ToolState;
+  replyOverride?: string;
+  download?: PdfDownload | null;
+}> {
   const waybillArg =
     typeof args.waybill === "string" ? args.waybill.trim() : "";
   const waybill = (waybillArg || state.activeWaybill || "").trim();
@@ -303,14 +314,40 @@ async function runTool(
     }
     if (match.orders.length === 1) {
       next.activeWaybill = match.orders[0].waybill;
+      const order = match.orders[0];
+      const phone = partyPhoneForOtp(order, next.callerPhone);
+      next.callerPhone = phone;
+      const sent = await ensureTrackingOtp({ phone, waybill: order.waybill });
+      if (!sent.ok) {
+        return {
+          result: JSON.stringify({
+            found: true,
+            count: 1,
+            order: summarizeOrderForTool(order, false),
+            otp_sent: false,
+            otp_error: sent.error,
+          }),
+          state: next,
+          replyOverride: formatShipmentCodeSendFailed(order, sent.error),
+        };
+      }
       return {
         result: JSON.stringify({
           found: true,
           count: 1,
-          order: summarizeOrderForTool(match.orders[0], false),
+          order: summarizeOrderForTool(order, false),
+          otp_sent: true,
+          masked_phone: sent.maskedPhone,
+          already_sent: Boolean(sent.alreadySent),
+          instruction:
+            "Tell the user only to reply with the 6-digit SMS code. Do NOT ask them to type OTP.",
         }),
         state: next,
-        replyOverride: formatMaskedSingleReply(match.orders[0]),
+        replyOverride: formatShipmentWithCodeSent(
+          order,
+          sent.maskedPhone,
+          sent.alreadySent
+        ),
       };
     }
     next.activeWaybill = null;
@@ -342,7 +379,7 @@ async function runTool(
     const phone =
       (typeof args.phone === "string" && args.phone) ||
       partyPhoneForOtp(order, state.callerPhone);
-    const sent = await sendTrackingOtp({ phone, waybill: order.waybill });
+    const sent = await ensureTrackingOtp({ phone, waybill: order.waybill });
     if (!sent.ok) {
       return {
         result: JSON.stringify({ ok: false, error: sent.error }),
@@ -354,9 +391,14 @@ async function runTool(
         ok: true,
         masked_phone: sent.maskedPhone,
         waybill: order.waybill,
+        already_sent: Boolean(sent.alreadySent),
       }),
       state: { ...state, activeWaybill: order.waybill, callerPhone: phone },
-      replyOverride: formatOtpSentReply(sent.maskedPhone, order.waybill),
+      replyOverride: formatOtpSentReply(
+        sent.maskedPhone,
+        order.waybill,
+        sent.alreadySent
+      ),
     };
   }
 
@@ -377,14 +419,44 @@ async function runTool(
         state,
       };
     }
-    const journey = await getOrderJourney(verified.waybill);
+    const pending = state.supportState.pendingAfterOtp;
+    const supportState = {
+      ...state.supportState,
+      pendingAfterOtp: null,
+    };
     const next: ToolState = {
       activeWaybill: verified.waybill,
       callerPhone: verified.phoneE164,
       sessionToken: verified.sessionToken,
       verified: true,
-      supportState: state.supportState,
+      supportState,
     };
+
+    if (pending === "invoices") {
+      const phone94 = normalisePhoneTo94(verified.phoneE164);
+      if (phone94) {
+        const summary = await getInvoiceSummaryForPhone(phone94);
+        if (summary) {
+          const filter: "pending" | "paid" | "all" = "all";
+          const url = `/api/invoices/pdf?phone=${encodeURIComponent(phone94)}&status=${filter}&token=${encodeURIComponent(verified.sessionToken)}`;
+          return {
+            result: JSON.stringify({
+              ok: true,
+              waybill: verified.waybill,
+              invoices: true,
+            }),
+            state: next,
+            replyOverride:
+              formatInvoiceSummaryReply(summary) +
+              "\n\n" +
+              formatPdfReadyReply(filter),
+            download: { url, label: "Download PDF" },
+          };
+        }
+      }
+    }
+
+    const journey = await getOrderJourney(verified.waybill);
     return {
       result: JSON.stringify({ ok: true, waybill: verified.waybill }),
       state: next,
@@ -450,9 +522,41 @@ async function runTool(
       };
     }
     if (!state.verified || !state.sessionToken) {
+      const order = await findOrderByWaybill(waybill);
+      if (!order) {
+        return {
+          result: JSON.stringify({ ok: false, error: "Need waybill" }),
+          state,
+        };
+      }
+      const phone = partyPhoneForOtp(order, state.callerPhone);
+      const sent = await ensureTrackingOtp({ phone, waybill: order.waybill });
+      const actionLabel =
+        name === "request_redelivery"
+          ? "log re-delivery"
+          : "connect you to an agent";
+      if (!sent.ok) {
+        return {
+          result: JSON.stringify({ ok: false, error: sent.error }),
+          state: { ...state, activeWaybill: order.waybill, callerPhone: phone },
+          replyOverride:
+            `I need a quick SMS check before I ${actionLabel}.\n\n` +
+            `${sent.error}\n\nTap **Resend code** when ready.`,
+        };
+      }
       return {
-        result: JSON.stringify({ ok: false, error: "Verify OTP first" }),
-        state,
+        result: JSON.stringify({
+          ok: false,
+          error: "Awaiting SMS code",
+          otp_sent: true,
+        }),
+        state: { ...state, activeWaybill: order.waybill, callerPhone: phone },
+        replyOverride: formatNeedVerifyThenAction(
+          sent.maskedPhone,
+          order.waybill,
+          actionLabel,
+          sent.alreadySent
+        ),
       };
     }
     if (name === "request_redelivery") {
@@ -521,9 +625,54 @@ async function runTool(
 
   if (name === "get_complaints") {
     if (!state.verified) {
+      const wb = waybill || state.activeWaybill;
+      if (wb) {
+        const order = await findOrderByWaybill(wb);
+        if (order) {
+          const phone = partyPhoneForOtp(order, state.callerPhone);
+          const sent = await ensureTrackingOtp({
+            phone,
+            waybill: order.waybill,
+          });
+          if (sent.ok) {
+            return {
+              result: JSON.stringify({
+                ok: false,
+                error: "Awaiting SMS code",
+                otp_sent: true,
+              }),
+              state: {
+                ...state,
+                activeWaybill: order.waybill,
+                callerPhone: phone,
+              },
+              replyOverride: formatNeedVerifyThenAction(
+                sent.maskedPhone,
+                order.waybill,
+                "show complaint status",
+                sent.alreadySent
+              ),
+            };
+          }
+          return {
+            result: JSON.stringify({ ok: false, error: sent.error }),
+            state: {
+              ...state,
+              activeWaybill: order.waybill,
+              callerPhone: phone,
+            },
+            replyOverride: `I need a quick SMS check to show complaint status.\n\n${sent.error}`,
+          };
+        }
+      }
       return {
-        result: JSON.stringify({ ok: false, error: "Verify OTP first" }),
+        result: JSON.stringify({
+          ok: false,
+          error: "Share a waybill first for SMS verification",
+        }),
         state,
+        replyOverride:
+          "Share a **waybill** first — I'll text a code, then show your complaint status.",
       };
     }
     try {
@@ -642,9 +791,57 @@ async function runTool(
       "";
     const phone94 = normalisePhoneTo94(phone);
     if (!phone94 || !state.sessionToken) {
+      const wb = state.activeWaybill;
+      if (wb) {
+        const order = await findOrderByWaybill(wb);
+        if (order) {
+          const otpPhone = partyPhoneForOtp(order, state.callerPhone || phone);
+          const sent = await ensureTrackingOtp({
+            phone: otpPhone,
+            waybill: order.waybill,
+          });
+          const supportState = {
+            ...state.supportState,
+            pendingAfterOtp: "invoices" as const,
+          };
+          if (sent.ok) {
+            return {
+              result: JSON.stringify({
+                ok: false,
+                error: "Awaiting SMS code",
+                otp_sent: true,
+              }),
+              state: {
+                ...state,
+                activeWaybill: order.waybill,
+                callerPhone: otpPhone,
+                supportState,
+              },
+              replyOverride: formatNeedVerifyThenAction(
+                sent.maskedPhone,
+                order.waybill,
+                "show invoices",
+                sent.alreadySent
+              ),
+            };
+          }
+          return {
+            result: JSON.stringify({ ok: false, error: sent.error }),
+            state: {
+              ...state,
+              activeWaybill: order.waybill,
+              callerPhone: otpPhone,
+              supportState,
+            },
+            replyOverride: `I need a quick SMS check for invoices.\n\n${sent.error}`,
+          };
+        }
+      }
       return {
         result: JSON.stringify({ ok: false, error: "Need verified phone" }),
         state,
+        replyOverride:
+          "Track a **waybill** first — I'll text a code, then we can open invoices.",
       };
     }
     const ok = await findValidSessionForPhone(
@@ -652,9 +849,46 @@ async function runTool(
       phone94
     );
     if (!ok) {
+      const wb = state.activeWaybill;
+      if (wb) {
+        const order = await findOrderByWaybill(wb);
+        if (order) {
+          const otpPhone = partyPhoneForOtp(order, phone94);
+          const sent = await ensureTrackingOtp({
+            phone: otpPhone,
+            waybill: order.waybill,
+          });
+          const supportState = {
+            ...state.supportState,
+            pendingAfterOtp: "invoices" as const,
+          };
+          if (sent.ok) {
+            return {
+              result: JSON.stringify({
+                ok: false,
+                error: "Session expired",
+                otp_sent: true,
+              }),
+              state: {
+                ...state,
+                activeWaybill: order.waybill,
+                callerPhone: otpPhone,
+                sessionToken: null,
+                verified: false,
+                supportState,
+              },
+              replyOverride:
+                `Your session expired — ${sent.alreadySent ? "use the code already sent" : "I've texted a fresh code"} to **${sent.maskedPhone}**.\n\n` +
+                `Reply with the **6 digits** and I'll open your invoices (with PDF).`,
+            };
+          }
+        }
+      }
       return {
         result: JSON.stringify({ ok: false, error: "Session invalid" }),
-        state,
+        state: { ...state, sessionToken: null, verified: false },
+        replyOverride:
+          "Your session expired. Share a waybill and I'll text a fresh code.",
       };
     }
     const summary = await getInvoiceSummaryForPhone(phone94);
@@ -664,6 +898,8 @@ async function runTool(
         state,
       };
     }
+    const filter: "pending" | "paid" | "all" = "all";
+    const url = `/api/invoices/pdf?phone=${encodeURIComponent(phone94)}&status=${filter}&token=${encodeURIComponent(state.sessionToken)}`;
     return {
       result: JSON.stringify({
         ok: true,
@@ -671,9 +907,14 @@ async function runTool(
         paid_total: summary.paidTotal,
         pending_count: summary.pendingCount,
         paid_count: summary.paidCount,
+        pdf_attached: true,
       }),
       state,
-      replyOverride: formatInvoiceSummaryReply(summary),
+      replyOverride:
+        formatInvoiceSummaryReply(summary) +
+        "\n\n" +
+        formatPdfReadyReply(filter),
+      download: { url, label: "Download PDF" },
     };
   }
 
@@ -759,10 +1000,13 @@ async function runGeminiInner(
 
   const lastUserText =
     [...options.history].reverse().find((h) => h.role === "user")?.text || "";
+  const lastNorm = lastUserText.toLowerCase().replace(/\s+/g, " ").trim();
+  // Tracking/"update" must never enter sales discovery
   const salesLead =
-    Boolean(state.supportState.inquiryBuffer) ||
-    isRichSalesInquiry(lastUserText.toLowerCase()) ||
-    isActiveSalesConversation(options.history);
+    !isShipmentUpdateIntent(lastNorm) &&
+    (Boolean(state.supportState.inquiryBuffer) ||
+      isRichSalesInquiry(lastNorm) ||
+      isActiveSalesConversation(options.history));
 
   function ensureInquiryBuffered(userNote: string) {
     if (state.supportState.inquiryBuffer) {
@@ -835,6 +1079,7 @@ async function runGeminiInner(
 
       const responseParts: Part[] = [];
       let replyOverride: string | undefined;
+      let download: PdfDownload | null | undefined;
 
       for (const call of functionCalls) {
         const name = call.name || "";
@@ -842,6 +1087,7 @@ async function runGeminiInner(
         const out = await runTool(name, args, state);
         state = out.state;
         if (out.replyOverride) replyOverride = out.replyOverride;
+        if (out.download) download = out.download;
 
         let payload: Record<string, unknown>;
         try {
@@ -861,6 +1107,7 @@ async function runGeminiInner(
           callerPhone: state.callerPhone,
           sessionToken: state.sessionToken,
           supportState: state.supportState,
+          download: download ?? null,
           suggestions: state.supportState.complaintDraft
             ? ["yes", "no"]
             : suggestionsFor(
@@ -885,7 +1132,7 @@ async function runGeminiInner(
               ?.text || "export inquiry",
             state.supportState.inquiryBuffer?.fields
           )
-        : "How can I help with your shipment today?");
+        : "How can I help you today?");
 
     // Always keep inquiry session alive for sales chats (even if model skipped the tool)
     if (salesLead || state.supportState.inquiryBuffer) {
