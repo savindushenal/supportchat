@@ -92,7 +92,12 @@ export async function runRuleAssistant(
   const normalized = message.toLowerCase().replace(/\s+/g, " ").trim();
 
   // Recover sales inquiry first — needed before yes/done submit
-  if (!supportState.inquiryBuffer) {
+  // Never revive a quote chat while the user is in a tracking flow
+  if (
+    !supportState.inquiryBuffer &&
+    supportState.pendingIntent !== "track" &&
+    supportState.pendingIntent !== "redelivery"
+  ) {
     const recoveredInquiry = recoverInquiryFromHistory(options.history ?? []);
     if (recoveredInquiry) {
       supportState = { ...supportState, inquiryBuffer: recoveredInquiry };
@@ -170,6 +175,12 @@ export async function runRuleAssistant(
 
   // Soft entry intents — ask the next useful question (no waybill demanded up front)
   if (/^(track|tracking|track\s*shipment|check\s*status)$/i.test(normalized)) {
+    // Leave any leftover sales buffer — tracking must not become a quote chat
+    supportState = {
+      ...supportState,
+      inquiryBuffer: null,
+      pendingIntent: "track",
+    };
     return {
       reply:
         "Sure — I can check that for you.\n\n" +
@@ -184,13 +195,13 @@ export async function runRuleAssistant(
       normalized
     )
   ) {
-    // Always start a fresh, friendly quote chat — ignore a weak auto-recovered buffer
     supportState = {
       ...supportState,
       inquiryBuffer: appendInquirySnippet(null, message, {
         priority: "high",
         topic: "Shipping quote",
       }),
+      pendingIntent: "quote",
     };
     return {
       reply:
@@ -202,6 +213,11 @@ export async function runRuleAssistant(
   }
 
   if (/^(re[\s-]?deliver(y)?|reschedule)$/i.test(normalized)) {
+    supportState = {
+      ...supportState,
+      inquiryBuffer: null,
+      pendingIntent: "redelivery",
+    };
     return {
       reply:
         "I can arrange a re-delivery follow-up.\n\n" +
@@ -213,14 +229,11 @@ export async function runRuleAssistant(
 
   // Status / "any update" — track shipment, never start a sales quote
   if (isShipmentUpdateIntent(normalized)) {
-    // Clear a wrongly opened empty sales buffer
-    if (
-      supportState.inquiryBuffer &&
-      !supportState.inquiryBuffer.fields?.destination &&
-      !supportState.inquiryBuffer.fields?.product
-    ) {
-      supportState = { ...supportState, inquiryBuffer: null };
-    }
+    supportState = {
+      ...supportState,
+      inquiryBuffer: null,
+      pendingIntent: "track",
+    };
     if (verified && currentWaybill) {
       const journey = await getOrderJourney(currentWaybill);
       if (journey) {
@@ -680,30 +693,41 @@ export async function runRuleAssistant(
 
   // Sales / quote discovery BEFORE re-delivery shortcuts ("1"/"2")
   // so answers like "1" (= one-time) never hit "Share or pick a waybill".
+  // But NEVER steal a phone/waybill meant for tracking.
   if (
     supportState.inquiryBuffer &&
     (looksLikePhone(message) || normalisePhoneTo94(message))
   ) {
-    callerPhone = normalisePhoneTo94(message) || message;
-    const phoneBuf = {
-      ...supportState.inquiryBuffer!,
-      contactPhone: callerPhone,
-    };
-    supportState = {
-      ...supportState,
-      inquiryBuffer: phoneBuf,
-    };
-    const ready =
-      Boolean(phoneBuf.fields?.product) &&
-      Boolean(phoneBuf.fields?.destination) &&
-      Boolean(phoneBuf.fields?.min_packs || phoneBuf.fields?.max_packs);
-    return {
-      reply:
-        `Perfect, thanks — I'll use **${callerPhone}**.\n\n` +
-        nextSalesQuestion(phoneBuf),
-      ...base(),
-      suggestions: ready ? ["yes", "help"] : ["help"],
-    };
+    if (shouldPreferShipmentLookup(message, supportState, options.history)) {
+      supportState = {
+        ...supportState,
+        inquiryBuffer: null,
+        pendingIntent: supportState.pendingIntent || "track",
+      };
+      // fall through to lookup below
+    } else {
+      callerPhone = normalisePhoneTo94(message) || message;
+      const phoneBuf = {
+        ...supportState.inquiryBuffer!,
+        contactPhone: callerPhone,
+      };
+      supportState = {
+        ...supportState,
+        inquiryBuffer: phoneBuf,
+        pendingIntent: "quote",
+      };
+      const ready =
+        Boolean(phoneBuf.fields?.product) &&
+        Boolean(phoneBuf.fields?.destination) &&
+        Boolean(phoneBuf.fields?.min_packs || phoneBuf.fields?.max_packs);
+      return {
+        reply:
+          `Perfect, thanks — I'll use **${callerPhone}**.\n\n` +
+          nextSalesQuestion(phoneBuf),
+        ...base(),
+        suggestions: ready ? ["yes", "help"] : ["help"],
+      };
+    }
   }
 
   if (
@@ -711,31 +735,40 @@ export async function runRuleAssistant(
     !isConversationClosing(normalized) &&
     !isInquirySubmitIntent(normalized)
   ) {
-    const fields = applySalesTurnFields(
-      supportState.inquiryBuffer.fields,
-      message
-    );
+    if (shouldPreferShipmentLookup(message, supportState, options.history)) {
+      supportState = {
+        ...supportState,
+        inquiryBuffer: null,
+        pendingIntent: supportState.pendingIntent || "track",
+      };
+      // fall through to lookup
+    } else {
+      const fields = applySalesTurnFields(
+        supportState.inquiryBuffer.fields,
+        message
+      );
 
-    const midBuf = appendInquirySnippet(
-      supportState.inquiryBuffer,
-      message,
-      { contactPhone: callerPhone, priority: "high", fields }
-    );
-    supportState = {
-      ...supportState,
-      inquiryBuffer: midBuf,
-    };
-    return {
-      reply: nextSalesQuestion(midBuf),
-      ...base(),
-      suggestions:
-        fields.product &&
-        fields.destination &&
-        (fields.min_packs || fields.max_packs) &&
-        midBuf.contactPhone
-          ? ["yes", "help"]
-          : ["help"],
-    };
+      const midBuf = appendInquirySnippet(
+        supportState.inquiryBuffer,
+        message,
+        { contactPhone: callerPhone, priority: "high", fields }
+      );
+      supportState = {
+        ...supportState,
+        inquiryBuffer: midBuf,
+      };
+      return {
+        reply: nextSalesQuestion(midBuf),
+        ...base(),
+        suggestions:
+          fields.product &&
+          fields.destination &&
+          (fields.min_packs || fields.max_packs) &&
+          midBuf.contactPhone
+            ? ["yes", "help"]
+            : ["help"],
+      };
+    }
   }
 
   if (isRichSalesInquiry(normalized) || isBusinessInquiry(normalized)) {
@@ -1490,6 +1523,69 @@ function isHumanAgent(text: string): boolean {
       text
     )
   );
+}
+
+/**
+ * True when a phone/waybill reply should look up a shipment,
+ * not continue a sales quote (fixes: track → phone → "which country?").
+ */
+function shouldPreferShipmentLookup(
+  message: string,
+  supportState: SupportState,
+  history?: { role: string; text: string }[] | null
+): boolean {
+  const isPhoneOrWaybill = Boolean(
+    looksLikePhone(message) ||
+      normalisePhoneTo94(message) ||
+      extractLookupQuery(message)
+  );
+  if (!isPhoneOrWaybill) return false;
+
+  if (
+    supportState.pendingIntent === "track" ||
+    supportState.pendingIntent === "redelivery"
+  ) {
+    return true;
+  }
+
+  // Last bot asked for tracking identifiers
+  const lastBot = [...(history ?? [])]
+    .reverse()
+    .find((t) => t.role === "bot" || t.role === "model");
+  if (
+    lastBot &&
+    /\b(waybill|phone number on the shipment|check that for you|latest status)\b/i.test(
+      lastBot.text
+    ) &&
+    !/\b(which country|looking to send|what are you sending)\b/i.test(lastBot.text)
+  ) {
+    return true;
+  }
+
+  // Recent user said track / update
+  const lastUser = [...(history ?? [])]
+    .reverse()
+    .find((t) => t.role === "user");
+  if (
+    lastUser &&
+    /^(track|tracking|update|any update|status)\b/i.test(
+      lastUser.text.trim()
+    )
+  ) {
+    return true;
+  }
+
+  // Accidental/weak sales buffer with no real quote fields
+  const fields = supportState.inquiryBuffer?.fields;
+  if (
+    supportState.inquiryBuffer &&
+    !fields?.product &&
+    !fields?.destination
+  ) {
+    return true;
+  }
+
+  return false;
 }
 
 export function extractLookupQuery(message: string): string | null {

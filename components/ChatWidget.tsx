@@ -21,6 +21,7 @@ type SupportState = {
     fields?: Record<string, string>;
   } | null;
   pendingAfterOtp?: "invoices" | "journey" | null;
+  pendingIntent?: "track" | "quote" | "redelivery" | "invoices" | null;
 };
 
 type Message = {
@@ -44,6 +45,7 @@ const EMPTY_SUPPORT: SupportState = {
   complaintDraft: null,
   inquiryBuffer: null,
   pendingAfterOtp: null,
+  pendingIntent: null,
 };
 
 const INITIAL_BOT_MESSAGE =

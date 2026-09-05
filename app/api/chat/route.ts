@@ -43,6 +43,14 @@ function mergeSupportState(
       result.inquiryBuffer !== undefined
         ? result.inquiryBuffer
         : incoming.inquiryBuffer,
+    pendingAfterOtp:
+      result.pendingAfterOtp !== undefined
+        ? result.pendingAfterOtp
+        : incoming.pendingAfterOtp,
+    pendingIntent:
+      result.pendingIntent !== undefined
+        ? result.pendingIntent
+        : incoming.pendingIntent,
   };
 }
 

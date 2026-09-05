@@ -26,6 +26,8 @@ export type SupportState = {
   inquiryBuffer: InquiryBuffer | null;
   /** After OTP, continue this action (e.g. invoices + PDF) without another ask. */
   pendingAfterOtp?: "invoices" | "journey" | null;
+  /** What the user just chose so follow-ups (e.g. a phone) stay in the right flow. */
+  pendingIntent?: "track" | "quote" | "redelivery" | "invoices" | null;
 };
 
 export function emptySupportState(): SupportState {
@@ -33,6 +35,7 @@ export function emptySupportState(): SupportState {
     complaintDraft: null,
     inquiryBuffer: null,
     pendingAfterOtp: null,
+    pendingIntent: null,
   };
 }
 
@@ -86,7 +89,16 @@ export function parseSupportState(raw: unknown): SupportState {
   const pendingAfterOtp =
     pendingRaw === "invoices" || pendingRaw === "journey" ? pendingRaw : null;
 
-  return { complaintDraft, inquiryBuffer, pendingAfterOtp };
+  const intentRaw = o.pendingIntent;
+  const pendingIntent =
+    intentRaw === "track" ||
+    intentRaw === "quote" ||
+    intentRaw === "redelivery" ||
+    intentRaw === "invoices"
+      ? intentRaw
+      : null;
+
+  return { complaintDraft, inquiryBuffer, pendingAfterOtp, pendingIntent };
 }
 
 /** Recover draft from the last bot “raise this complaint” message (if client state was lost). */
@@ -776,10 +788,10 @@ export function isActiveSalesConversation(
     ) {
       return true;
     }
-    // Multi-turn quote chat: bot asked destination/product and user answered
+    // Multi-turn quote chat: bot asked a real discovery question (not the welcome menu)
     if (
       t.role === "bot" &&
-      /\b(which country|what are you sending|how many packs|shipping quote|export options)\b/i.test(
+      /\b(which country|where are you looking to send|what are you sending|how many packs|export options|roughly how many)\b/i.test(
         text
       )
     ) {
