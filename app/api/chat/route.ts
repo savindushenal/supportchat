@@ -82,7 +82,8 @@ export async function POST(request: NextRequest) {
     if (!message && !flushInquiries) {
       return NextResponse.json<ChatResponseBody>({
         reply:
-          "How can I help with your **TransExpress** shipment? Share a **waybill** or **contact number**, or type **help**.",
+          "Hi — how can I help with your **TransExpress** shipment?\n\n" +
+          "Share a **waybill** or **contact number** and I'll look it up.",
         waybill: currentWaybill,
         callerPhone,
         sessionToken,

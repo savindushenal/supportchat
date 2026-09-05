@@ -25,23 +25,52 @@ export function formatMaskedOrdersReply(
   });
 
   return (
-    `Found **${orders.length} active shipment${orders.length === 1 ? "" : "s"}** for **${phoneLabel}**:\n\n` +
+    `I found **${orders.length} active shipment${orders.length === 1 ? "" : "s"}** for **${phoneLabel}**:\n\n` +
     `${lines.join("\n")}\n\n` +
-    `Reply with a **waybill** to continue. Full journey / invoices need **SMS OTP**.`
+    `Tap a **waybill** below and I'll text you a verification code automatically.`
   );
 }
 
-export function formatMaskedSingleReply(order: OrderSummary): string {
+/** Single shipment + auto-sent SMS code (preferred UX — no "type OTP" step). */
+export function formatShipmentWithCodeSent(
+  order: OrderSummary,
+  maskedPhone: string,
+  alreadySent?: boolean
+): string {
   const redeliveryNote =
     order.status.toLowerCase() === "re_delivery"
-      ? `\n_Already on re-delivery — you can still reply **1** after OTP to send a follow-up._\n`
+      ? `\n_Already on re-delivery — after the code you can still ask for a follow-up._\n`
       : "";
 
+  const smsLine = alreadySent
+    ? `A verification code was already sent to **${maskedPhone}**.`
+    : `I've texted a 6-digit code to **${maskedPhone}**.`;
+
   return (
-    `Shipment **${order.waybill}** — status *${statusLabel(order.status)}*.\n` +
+    `Shipment **${order.waybill}** — *${statusLabel(order.status)}*.\n` +
     redeliveryNote +
-    `\nVerify with **SMS OTP** for the full journey, invoices, or to log actions.\n\n` +
-    `Reply **OTP** to receive a code, or **help**.`
+    `\n${smsLine}\n` +
+    `Just reply with that **code** to unlock the full journey.`
+  );
+}
+
+/** Lookup succeeded but SMS failed — still show status; offer resend. */
+export function formatShipmentCodeSendFailed(
+  order: OrderSummary,
+  error: string
+): string {
+  return (
+    `Shipment **${order.waybill}** — *${statusLabel(order.status)}*.\n\n` +
+    `I couldn't text the verification code yet (${error}).\n` +
+    `Tap **Resend code** when you're ready.`
+  );
+}
+
+/** @deprecated Prefer formatShipmentWithCodeSent — kept for rare no-phone edge cases */
+export function formatMaskedSingleReply(order: OrderSummary): string {
+  return (
+    `Shipment **${order.waybill}** — status *${statusLabel(order.status)}*.\n\n` +
+    `I'll text a verification code next — tap **Resend code** if you don't get one.`
   );
 }
 
@@ -52,14 +81,39 @@ export function formatClosedOnlyReply(
   return (
     `No **active** shipments for **${phoneLabel}**.\n\n` +
     `Most recent closed: **${order.waybill}** — *${statusLabel(order.status)}*\n\n` +
-    `Customer Care: **+94 112 999 888**`
+    `Need help anyway? Call Care: **+94 112 999 888**`
   );
 }
 
-export function formatOtpSentReply(maskedPhone: string, waybill: string): string {
+export function formatOtpSentReply(
+  maskedPhone: string,
+  waybill: string,
+  alreadySent?: boolean
+): string {
+  if (alreadySent) {
+    return (
+      `A code for **${waybill}** is already on its way to **${maskedPhone}**.\n\n` +
+      `Reply with the **6-digit code** from that SMS.`
+    );
+  }
   return (
-    `I've sent a 6-digit code to **${maskedPhone}** for waybill **${waybill}**.\n\n` +
-    `Reply with the code to unlock journey details, invoices, complaints, and actions.`
+    `I've sent a 6-digit code to **${maskedPhone}** for **${waybill}**.\n\n` +
+    `Reply with that code — that's all I need.`
+  );
+}
+
+export function formatNeedVerifyThenAction(
+  maskedPhone: string,
+  waybill: string,
+  actionLabel: string,
+  alreadySent?: boolean
+): string {
+  const sms = alreadySent
+    ? `A code is already with **${maskedPhone}**.`
+    : `I've texted a code to **${maskedPhone}**.`;
+  return (
+    `Quick check before I ${actionLabel} for **${waybill}**.\n\n` +
+    `${sms} Reply with the **6-digit code**, then I'll continue.`
   );
 }
 
@@ -82,7 +136,7 @@ export function formatJourneyReply(journey: OrderJourney): string {
       : "";
 
   return (
-    `📦 **Verified journey — ${journey.waybill}**\n\n` +
+    `**Verified journey — ${journey.waybill}**\n\n` +
     `Status: *${statusLabel(journey.status)}*` +
     (journey.branch ? `\nBranch: **${journey.branch}**` : "") +
     `\nYou: **${journey.role}**` +
@@ -92,8 +146,8 @@ export function formatJourneyReply(journey: OrderJourney): string {
     `\n\n**Timeline**\n${timeline || "(no events yet)"}` +
     `\n\n➡️ ${journey.nextHint}` +
     `\n\n**1** — Re-delivery (or follow-up)\n**2** — Human agent\n` +
-    `Say your issue → we draft a complaint → **yes** to raise · **complaint status** to check\n` +
-    `Ask **pricing** or business quotes · **pending invoices** / **Download PDF**`
+    `Describe an issue and I'll draft a complaint · **complaint status** to check tickets\n` +
+    `Ask about **pricing** or **pending invoices** anytime`
   );
 }
 
@@ -118,7 +172,7 @@ export function formatComplaintsReply(tickets: ComplaintTicket[]): string {
     );
   });
   return (
-    `📋 **Complaint status** (${tickets.length})\n\n` +
+    `**Complaint status** (${tickets.length})\n\n` +
     lines.join("\n\n") +
     `\n\nTo file a new one: **complaint:** your issue`
   );
@@ -139,7 +193,7 @@ export function formatInvoiceSummaryReply(summary: InvoiceSummary): string {
     .join("\n");
 
   return (
-    `🧾 **Invoices — ${summary.clientName}** (${maskPhone(summary.phoneE164)})\n\n` +
+    `**Invoices — ${summary.clientName}** (${maskPhone(summary.phoneE164)})\n\n` +
     `**Pending:** ${summary.pendingCount} · **${money(summary.pendingTotal)}**\n` +
     (pendingLines || "• (none)") +
     `\n\n**Paid:** ${summary.paidCount} · **${money(summary.paidTotal)}**\n` +
@@ -150,14 +204,10 @@ export function formatInvoiceSummaryReply(summary: InvoiceSummary): string {
 
 export function formatPdfReadyReply(kind: "pending" | "paid" | "all"): string {
   const label =
-    kind === "pending"
-      ? "pending"
-      : kind === "paid"
-        ? "paid"
-        : "all";
+    kind === "pending" ? "pending" : kind === "paid" ? "paid" : "all";
   return (
     `Your **${label}** invoice PDF is ready.\n` +
-    `Tap **Download PDF** below (valid while your OTP session lasts ~30 min).`
+    `Tap **Download PDF** below (valid while your session lasts ~30 min).`
   );
 }
 
@@ -169,7 +219,8 @@ export function summarizeOrderForTool(order: OrderSummary, verified: boolean) {
       role: order.role,
       verified: false,
       can_request_redelivery: true,
-      message: "OTP required for full journey / invoices.",
+      message:
+        "Verification SMS is sent automatically — ask the user only for the 6-digit code.",
     };
   }
   return {

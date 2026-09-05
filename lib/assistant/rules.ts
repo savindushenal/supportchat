@@ -13,7 +13,11 @@ import {
   saveOrganizedInquiry,
   updateOrderAction,
 } from "@/lib/supabase";
-import { sendTrackingOtp, verifyTrackingOtp, hashSecret } from "@/lib/otp";
+import {
+  ensureTrackingOtp,
+  verifyTrackingOtp,
+  hashSecret,
+} from "@/lib/otp";
 import type { AssistantResult } from "@/lib/assistant/llm";
 import {
   formatClosedOnlyReply,
@@ -21,9 +25,11 @@ import {
   formatInvoiceSummaryReply,
   formatJourneyReply,
   formatMaskedOrdersReply,
-  formatMaskedSingleReply,
+  formatNeedVerifyThenAction,
   formatOtpSentReply,
   formatPdfReadyReply,
+  formatShipmentCodeSendFailed,
+  formatShipmentWithCodeSent,
 } from "@/lib/assistant/format";
 import {
   isInBusinessScope,
@@ -142,7 +148,8 @@ export async function runRuleAssistant(
   if (!message && !options.flushInquiries) {
     return {
       reply:
-        "How can I help with your **TransExpress** shipment? Share a **waybill** or **contact number**, or type **help**.",
+        "Hi — how can I help with your TransExpress shipment?\n\n" +
+        "Share a **waybill** or **phone number** and I'll look it up.",
       ...base(),
       suggestions: [],
     };
@@ -151,9 +158,10 @@ export async function runRuleAssistant(
   if (isGreeting(normalized)) {
     return {
       reply:
-        "Hi! I'm the **TransExpress support agent**.\n\n" +
-        "I help **senders and receivers** track shipments. Full journey details need **SMS OTP**.\n\n" +
-        "Send a **waybill** / **phone number**, or type **help**.",
+        "Hi! I'm the TransExpress support agent.\n\n" +
+        "Share a **waybill** or **phone number** and I'll look it up — " +
+        "I'll text a short verification code when you need full journey details.\n\n" +
+        "Or type **help** anytime.",
       ...base(),
       suggestions: ["help"],
     };
@@ -162,17 +170,16 @@ export async function runRuleAssistant(
   if (isHelp(normalized)) {
     return {
       reply:
-        "TransExpress support:\n\n" +
-        "• **Track** — waybill or phone (sender or receiver)\n" +
-        "• **OTP** — unlock journey, invoices, complaints, actions\n" +
-        "• **1** — re-delivery / follow-up (even if already scheduled)\n" +
+        "Here's what I can do:\n\n" +
+        "• **Track** — send a waybill or phone (sender or receiver)\n" +
+        "• Full journey / invoices — I text a code automatically; you just reply with the digits\n" +
+        "• **1** — re-delivery / follow-up\n" +
         "• **2** — human agent\n" +
-        "• Describe an issue → we draft a complaint → you **approve** before save\n" +
-        "• **complaint status** — check tickets\n" +
-        "• **pricing** / business quotes · **pending invoices**\n\n" +
+        "• Describe an issue → I draft a complaint → you say **yes** to raise it\n" +
+        "• **complaint status** · **pricing** · **pending invoices**\n\n" +
         "Care: **+94 112 999 888**",
       ...base(),
-      suggestions: currentWaybill ? ["OTP", "help"] : ["help"],
+      suggestions: currentWaybill && !verified ? ["OTP", "help"] : ["help"],
     };
   }
 
@@ -225,7 +232,9 @@ export async function runRuleAssistant(
       });
       if (!result.ok) {
         return {
-          reply: result.error + "\n\nReply with the 6-digit code again, or **no** to cancel.",
+          reply:
+            result.error +
+            "\n\nReply with the 6-digit code again, or **no** to cancel.",
           ...base(),
           suggestions: ["OTP", "no"],
         };
@@ -263,7 +272,10 @@ export async function runRuleAssistant(
     if (looksLikePhone(message) || normalisePhoneTo94(message)) {
       callerPhone = normalisePhoneTo94(message) || message;
       const otpWb = complaintOtpWaybill(draft, currentWaybill);
-      const sent = await sendTrackingOtp({ phone: callerPhone, waybill: otpWb });
+      const sent = await ensureTrackingOtp({
+        phone: callerPhone,
+        waybill: otpWb,
+      });
       if (!sent.ok) {
         supportState = {
           ...supportState,
@@ -282,7 +294,9 @@ export async function runRuleAssistant(
       return {
         reply:
           `Thanks — mobile **${sent.maskedPhone}** noted.\n\n` +
-          `I sent an **OTP** to verify before raising the complaint. Reply with the **6-digit code**.`,
+          (sent.alreadySent
+            ? `A code is already on its way — reply with the **6 digits** to raise the complaint.`
+            : `I've texted a 6-digit code. Reply with that code to raise the complaint.`),
         waybill: draft.waybill || currentWaybill,
         callerPhone,
         sessionToken,
@@ -323,7 +337,7 @@ export async function runRuleAssistant(
       // Have phone but not verified → send OTP
       if (callerPhone) {
         const otpWb = complaintOtpWaybill(draft, currentWaybill);
-        const sent = await sendTrackingOtp({
+        const sent = await ensureTrackingOtp({
           phone: callerPhone,
           waybill: otpWb,
         });
@@ -340,8 +354,8 @@ export async function runRuleAssistant(
         };
         return {
           reply:
-            `Please verify your mobile **${sent.maskedPhone}** before we raise the complaint.\n\n` +
-            `I sent an **OTP** — reply with the **6-digit code**.`,
+            `Almost done — ${sent.alreadySent ? "use the code already sent" : "I've texted a code"} to **${sent.maskedPhone}**.\n\n` +
+            `Reply with the **6-digit code** and I'll raise the complaint.`,
           waybill: draft.waybill || currentWaybill,
           callerPhone,
           sessionToken,
@@ -357,8 +371,8 @@ export async function runRuleAssistant(
       };
       return {
         reply:
-          "To raise this complaint I need to verify your mobile.\n\n" +
-          "Please send your **mobile number** (07… or **9477…**). I'll SMS an OTP, then save the complaint.",
+          "To raise this complaint I need your mobile for a quick SMS check.\n\n" +
+          "Please send your **mobile number** (07… or **9477…**) — I'll text a code, then save it.",
         ...base(),
         suggestions: ["no"],
       };
@@ -368,10 +382,10 @@ export async function runRuleAssistant(
     if (draft.phase === "awaiting_otp") {
       return {
         reply:
-          "Waiting for the **6-digit OTP** to verify your mobile and raise the complaint.\n" +
+          "Waiting for the **6-digit code** from SMS to raise the complaint.\n" +
           "Or reply **no** to cancel.",
         ...base(),
-        suggestions: ["no"],
+        suggestions: ["OTP", "no"],
       };
     }
     if (draft.phase === "awaiting_phone") {
@@ -408,7 +422,7 @@ export async function runRuleAssistant(
   if (/^(thanks|thank you|ty|bye|cool|great)\b[!?.]*$/.test(normalized)) {
     return {
       reply:
-        "You're welcome! Send a **waybill** or **phone number** anytime for shipment help.",
+        "You're welcome! Send a waybill or phone number anytime — happy to help.",
       ...base(),
       suggestions: ["help"],
     };
@@ -466,7 +480,7 @@ export async function runRuleAssistant(
     return {
       reply: journey
         ? formatJourneyReply(journey)
-        : "Verified — but journey data was not found.",
+        : "You're verified — but I couldn't load the journey just now. Try asking for status again.",
       waybill: result.waybill,
       callerPhone,
       sessionToken,
@@ -474,14 +488,17 @@ export async function runRuleAssistant(
     };
   }
 
-  // Request OTP
+  // Resend verification code (auto-send happens on lookup — this is only resend)
   if (
-    /^(otp|send\s*otp|verify|resend(\s*otp)?|code)$/i.test(normalized) ||
+    /^(otp|send\s*otp|verify|resend(\s*otp)?|resend(\s*code)?|code)$/i.test(
+      normalized
+    ) ||
     /\b(send|resend)\s*(me\s*)?(an?\s*)?(otp|code)\b/i.test(normalized)
   ) {
     if (!currentWaybill) {
       return {
-        reply: "Pick a **waybill** first, then reply **OTP**.",
+        reply:
+          "Share a **waybill** first — I'll text the verification code automatically.",
         waybill: null,
         callerPhone,
         sessionToken,
@@ -491,7 +508,7 @@ export async function runRuleAssistant(
     const order = await findOrderByWaybill(currentWaybill);
     if (!order) {
       return {
-        reply: `Waybill **${currentWaybill}** not found.`,
+        reply: `I couldn't find waybill **${currentWaybill}**. Double-check the number?`,
         waybill: null,
         callerPhone,
         sessionToken,
@@ -499,7 +516,7 @@ export async function runRuleAssistant(
       };
     }
     const phone = partyPhoneForOtp(order, callerPhone);
-    const sent = await sendTrackingOtp({ phone, waybill: order.waybill });
+    const sent = await ensureTrackingOtp({ phone, waybill: order.waybill });
     if (!sent.ok) {
       return {
         reply: sent.error,
@@ -510,7 +527,11 @@ export async function runRuleAssistant(
       };
     }
     return {
-      reply: formatOtpSentReply(sent.maskedPhone, order.waybill),
+      reply: formatOtpSentReply(
+        sent.maskedPhone,
+        order.waybill,
+        sent.alreadySent
+      ),
       waybill: order.waybill,
       callerPhone: phone,
       sessionToken,
@@ -605,7 +626,7 @@ export async function runRuleAssistant(
   if (isRedelivery(normalized) || isHumanAgent(normalized)) {
     if (!currentWaybill) {
       return {
-        reply: "Share or pick a **waybill** first.",
+        reply: "Share a **waybill** first and I'll take it from there.",
         waybill: null,
         callerPhone,
         sessionToken,
@@ -613,11 +634,41 @@ export async function runRuleAssistant(
       };
     }
     if (!verified) {
+      const order = await findOrderByWaybill(currentWaybill);
+      if (!order) {
+        return {
+          reply: `I couldn't find **${currentWaybill}**. Share a valid waybill?`,
+          waybill: null,
+          callerPhone,
+          sessionToken,
+          suggestions: ["help"],
+        };
+      }
+      const phone = partyPhoneForOtp(order, callerPhone);
+      const sent = await ensureTrackingOtp({ phone, waybill: order.waybill });
+      const actionLabel = isRedelivery(normalized)
+        ? "log re-delivery"
+        : "connect you to an agent";
+      if (!sent.ok) {
+        return {
+          reply:
+            `I need a quick SMS check before I ${actionLabel}.\n\n` +
+            `${sent.error}\n\nTap **Resend code** when ready.`,
+          waybill: order.waybill,
+          callerPhone: phone,
+          sessionToken,
+          suggestions: ["OTP", "help"],
+        };
+      }
       return {
-        reply:
-          "Please **verify with OTP** first (reply **OTP**), then I can log re-delivery or connect an agent.",
-        waybill: currentWaybill,
-        callerPhone,
+        reply: formatNeedVerifyThenAction(
+          sent.maskedPhone,
+          order.waybill,
+          actionLabel,
+          sent.alreadySent
+        ),
+        waybill: order.waybill,
+        callerPhone: phone,
         sessionToken,
         suggestions: ["OTP", "help"],
       };
@@ -647,11 +698,43 @@ export async function runRuleAssistant(
   // Complaint status (check first — never treat as a new complaint)
   if (isComplaintStatusIntent(normalized)) {
     if (!verified) {
+      if (currentWaybill) {
+        const order = await findOrderByWaybill(currentWaybill);
+        if (order) {
+          const phone = partyPhoneForOtp(order, callerPhone);
+          const sent = await ensureTrackingOtp({
+            phone,
+            waybill: order.waybill,
+          });
+          if (sent.ok) {
+            return {
+              reply: formatNeedVerifyThenAction(
+                sent.maskedPhone,
+                order.waybill,
+                "show complaint status",
+                sent.alreadySent
+              ),
+              waybill: order.waybill,
+              callerPhone: phone,
+              sessionToken,
+              suggestions: ["OTP", "help"],
+            };
+          }
+          return {
+            reply:
+              `I need a quick SMS check to show complaint status.\n\n${sent.error}`,
+            waybill: order.waybill,
+            callerPhone: phone,
+            sessionToken,
+            suggestions: ["OTP", "help"],
+          };
+        }
+      }
       return {
         reply:
-          "To check complaint status, please **verify with OTP** first (pick a waybill → **OTP**).",
+          "Share a **waybill** first — I'll text a code, then show your complaint status.",
         ...base(),
-        suggestions: currentWaybill ? ["OTP", "help"] : ["help"],
+        suggestions: ["help"],
       };
     }
     try {
@@ -729,13 +812,44 @@ export async function runRuleAssistant(
     }
     const phone94 = normalisePhoneTo94(callerPhone);
     if (!phone94 || !sessionToken) {
+      if (currentWaybill) {
+        const order = await findOrderByWaybill(currentWaybill);
+        if (order) {
+          const phone = partyPhoneForOtp(order, callerPhone);
+          const sent = await ensureTrackingOtp({
+            phone,
+            waybill: order.waybill,
+          });
+          if (sent.ok) {
+            return {
+              reply: formatNeedVerifyThenAction(
+                sent.maskedPhone,
+                order.waybill,
+                "show invoices",
+                sent.alreadySent
+              ),
+              waybill: order.waybill,
+              callerPhone: phone,
+              sessionToken,
+              suggestions: ["OTP", "help"],
+            };
+          }
+          return {
+            reply: `I need a quick SMS check for invoices.\n\n${sent.error}`,
+            waybill: order.waybill,
+            callerPhone: phone,
+            sessionToken,
+            suggestions: ["OTP", "help"],
+          };
+        }
+      }
       return {
         reply:
-          "Invoice details need **OTP verification**. Track a waybill, reply **OTP**, then ask again.",
+          "Track a **waybill** first — I'll text a code, then we can open invoices.",
         waybill: currentWaybill,
         callerPhone,
         sessionToken,
-        suggestions: currentWaybill ? ["OTP", "help"] : ["help"],
+        suggestions: ["help"],
       };
     }
     const phoneOk = await findValidSessionForPhone(
@@ -743,13 +857,34 @@ export async function runRuleAssistant(
       phone94
     );
     if (!phoneOk) {
+      if (currentWaybill) {
+        const order = await findOrderByWaybill(currentWaybill);
+        if (order) {
+          const phone = partyPhoneForOtp(order, callerPhone);
+          const sent = await ensureTrackingOtp({
+            phone,
+            waybill: order.waybill,
+          });
+          if (sent.ok) {
+            return {
+              reply:
+                `Your session expired — ${sent.alreadySent ? "use the code already sent" : "I've texted a fresh code"} to **${sent.maskedPhone}**.\n\n` +
+                `Reply with the **6 digits**, then ask for invoices again.`,
+              waybill: order.waybill,
+              callerPhone: phone,
+              sessionToken: null,
+              suggestions: ["OTP", "help"],
+            };
+          }
+        }
+      }
       return {
         reply:
-          "Your session expired. Reply **OTP** on a waybill for this account, then ask for invoices again.",
+          "Your session expired. Share a waybill and I'll text a fresh code.",
         waybill: currentWaybill,
         callerPhone,
         sessionToken: null,
-        suggestions: ["OTP", "help"],
+        suggestions: currentWaybill ? ["OTP", "help"] : ["help"],
       };
     }
 
@@ -836,7 +971,7 @@ export async function runRuleAssistant(
     if (isInBusinessScope(message)) {
       return {
         reply:
-          "Happy to help. Please send your **waybill** or **contact number** (sender or receiver).",
+          "Happy to help. Send your **waybill** or **contact number** (sender or receiver) and I'll look it up.",
         waybill: currentWaybill,
         callerPhone,
         sessionToken,
@@ -946,10 +1081,27 @@ async function replyFromLookup(
     }
   }
 
+  // Auto-send SMS code — user only enters digits (no "type OTP" step)
+  const phone = partyPhoneForOtp(order, ctx.callerPhone);
+  const sent = await ensureTrackingOtp({ phone, waybill: order.waybill });
+  if (!sent.ok) {
+    return {
+      reply: formatShipmentCodeSendFailed(order, sent.error),
+      waybill: order.waybill,
+      callerPhone: phone,
+      sessionToken: ctx.sessionToken,
+      suggestions: ["OTP", "help"],
+    };
+  }
+
   return {
-    reply: formatMaskedSingleReply(order),
+    reply: formatShipmentWithCodeSent(
+      order,
+      sent.maskedPhone,
+      sent.alreadySent
+    ),
     waybill: order.waybill,
-    callerPhone: ctx.callerPhone,
+    callerPhone: phone,
     sessionToken: ctx.sessionToken,
     suggestions: ["OTP", "help"],
   };
@@ -963,6 +1115,7 @@ function isOutOfScopeChat(
   if (extractLookupQuery(message)) return false;
   if (isRedelivery(normalized) || isHumanAgent(normalized)) return false;
   if (/^(otp|send\s*otp|verify|resend)/i.test(normalized)) return false;
+  if (/^resend(\s*code)?$/i.test(normalized)) return false;
   if (/^\d{6}$/.test(message.trim())) return false;
   if (isApproveIntent(normalized) || isRejectIntent(normalized)) return false;
   if (isInvoiceIntent(normalized)) return false;

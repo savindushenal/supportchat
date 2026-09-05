@@ -14,9 +14,9 @@ export default function Home() {
           Fast, Reliable, Delivered with Care
         </p>
         <p className="max-w-xl text-lg leading-relaxed text-slate-600">
-          Open the support agent for shipment help — senders and receivers can
-          track, verify with SMS OTP for the full journey, request re-delivery,
-          or reach customer care.
+          Open the support agent for shipment help — send a waybill or phone,
+          get a short SMS code for the full journey, request re-delivery, or
+          reach customer care.
         </p>
         <ul className="mt-4 space-y-2 text-slate-600">
           <li className="flex items-start gap-2">
@@ -25,11 +25,11 @@ export default function Home() {
           </li>
           <li className="flex items-start gap-2">
             <span className="mt-1 text-blue-500">✓</span>
-            SMS OTP unlocks warehouse → dispatch → delivery timeline
+            SMS code unlocks warehouse → dispatch → delivery timeline
           </li>
           <li className="flex items-start gap-2">
             <span className="mt-1 text-blue-500">✓</span>
-            Re-delivery or human agent after verification
+            Re-delivery or human agent after a quick SMS check
           </li>
         </ul>
         <p className="mt-8 text-sm text-slate-500">
