@@ -46,10 +46,12 @@ import {
   isActiveSalesConversation,
   isBusinessInquiry,
   isConversationClosing,
+  isGreetingMessage,
   isInquiryIntent,
   isInquirySubmitIntent,
   isRejectIntent,
   isRichSalesInquiry,
+  isShipmentUpdateIntent,
   nextSalesQuestion,
   organizeComplaintText,
   organizeInquirySummary,
@@ -155,13 +157,80 @@ export async function runRuleAssistant(
     };
   }
 
-  if (isGreeting(normalized)) {
+  if (isGreetingMessage(normalized)) {
     return {
       reply:
         "Hi! I'm the TransExpress support agent.\n\n" +
         "Share a **waybill** or **phone number** and I'll look it up — " +
         "I'll text a short verification code when you need full journey details.\n\n" +
         "Or type **help** anytime.",
+      ...base(),
+      suggestions: ["help"],
+    };
+  }
+
+  // Status / "any update" — track shipment, never start a sales quote
+  if (isShipmentUpdateIntent(normalized)) {
+    // Clear a wrongly opened empty sales buffer
+    if (
+      supportState.inquiryBuffer &&
+      !supportState.inquiryBuffer.fields?.destination &&
+      !supportState.inquiryBuffer.fields?.product
+    ) {
+      supportState = { ...supportState, inquiryBuffer: null };
+    }
+    if (verified && currentWaybill) {
+      const journey = await getOrderJourney(currentWaybill);
+      if (journey) {
+        return {
+          reply: formatJourneyReply(journey),
+          ...base(),
+          suggestions: ["1", "2", "help"],
+        };
+      }
+    }
+    if (currentWaybill && !verified) {
+      const order = await findOrderByWaybill(currentWaybill);
+      if (order) {
+        const phone = partyPhoneForOtp(order, callerPhone);
+        const sent = await ensureTrackingOtp({
+          phone,
+          waybill: order.waybill,
+        });
+        supportState = {
+          ...supportState,
+          pendingAfterOtp: "journey",
+        };
+        if (!sent.ok) {
+          return {
+            reply:
+              `I'll get you an update on **${order.waybill}** after a quick SMS check.\n\n` +
+              `${sent.error}`,
+            waybill: order.waybill,
+            callerPhone: phone,
+            sessionToken,
+            supportState,
+            suggestions: ["OTP", "help"],
+          };
+        }
+        return {
+          reply:
+            `I'll get you an update on **${order.waybill}**.\n\n` +
+            (sent.alreadySent
+              ? `A code is already with **${sent.maskedPhone}** — reply with the **6 digits**.`
+              : `I've texted a code to **${sent.maskedPhone}**. Reply with the **6 digits** and I'll show the latest status.`),
+          waybill: order.waybill,
+          callerPhone: phone,
+          sessionToken,
+          supportState,
+          suggestions: ["OTP", "help"],
+        };
+      }
+    }
+    return {
+      reply:
+        "Happy to check the latest status for you.\n\n" +
+        "Please share your **waybill** or the **phone number** on the shipment.",
       ...base(),
       suggestions: ["help"],
     };
@@ -476,6 +545,33 @@ export async function runRuleAssistant(
     }
     sessionToken = result.sessionToken;
     callerPhone = result.phoneE164;
+    const pending = supportState.pendingAfterOtp;
+    supportState = { ...supportState, pendingAfterOtp: null };
+
+    // Continue invoices + PDF after OTP without making the user ask again
+    if (pending === "invoices") {
+      const phone94 = normalisePhoneTo94(callerPhone);
+      if (phone94) {
+        const summary = await getInvoiceSummaryForPhone(phone94);
+        if (summary) {
+          const filter: "pending" | "paid" | "all" = "all";
+          const url = `/api/invoices/pdf?phone=${encodeURIComponent(phone94)}&status=${filter}&token=${encodeURIComponent(sessionToken)}`;
+          return {
+            reply:
+              formatInvoiceSummaryReply(summary) +
+              "\n\n" +
+              formatPdfReadyReply(filter),
+            waybill: result.waybill,
+            callerPhone,
+            sessionToken,
+            supportState,
+            suggestions: ["pending pdf", "paid pdf", "help"],
+            download: { url, label: "Download PDF" },
+          };
+        }
+      }
+    }
+
     const journey = await getOrderJourney(result.waybill);
     return {
       reply: journey
@@ -484,6 +580,7 @@ export async function runRuleAssistant(
       waybill: result.waybill,
       callerPhone,
       sessionToken,
+      supportState,
       suggestions: ["1", "2", "help"],
     };
   }
@@ -820,6 +917,7 @@ export async function runRuleAssistant(
             phone,
             waybill: order.waybill,
           });
+          supportState = { ...supportState, pendingAfterOtp: "invoices" };
           if (sent.ok) {
             return {
               reply: formatNeedVerifyThenAction(
@@ -831,6 +929,7 @@ export async function runRuleAssistant(
               waybill: order.waybill,
               callerPhone: phone,
               sessionToken,
+              supportState,
               suggestions: ["OTP", "help"],
             };
           }
@@ -839,6 +938,7 @@ export async function runRuleAssistant(
             waybill: order.waybill,
             callerPhone: phone,
             sessionToken,
+            supportState,
             suggestions: ["OTP", "help"],
           };
         }
@@ -865,14 +965,16 @@ export async function runRuleAssistant(
             phone,
             waybill: order.waybill,
           });
+          supportState = { ...supportState, pendingAfterOtp: "invoices" };
           if (sent.ok) {
             return {
               reply:
                 `Your session expired — ${sent.alreadySent ? "use the code already sent" : "I've texted a fresh code"} to **${sent.maskedPhone}**.\n\n` +
-                `Reply with the **6 digits**, then ask for invoices again.`,
+                `Reply with the **6 digits** and I'll open your invoices (with PDF).`,
               waybill: order.waybill,
               callerPhone: phone,
               sessionToken: null,
+              supportState,
               suggestions: ["OTP", "help"],
             };
           }
@@ -888,7 +990,6 @@ export async function runRuleAssistant(
       };
     }
 
-    const wantPdf = /\bpdf\b/i.test(normalized);
     const filter: "pending" | "paid" | "all" = /\bpaid\b/i.test(normalized)
       ? "paid"
       : /\bpending\b/i.test(normalized)
@@ -906,43 +1007,38 @@ export async function runRuleAssistant(
       };
     }
 
-    if (wantPdf) {
-      const url = `/api/invoices/pdf?phone=${encodeURIComponent(phone94)}&status=${filter}&token=${encodeURIComponent(sessionToken)}`;
-      const label =
-        filter === "pending"
-          ? "Download pending PDF"
-          : filter === "paid"
-            ? "Download paid PDF"
-            : "Download PDF";
+    // Always attach PDF download — no extra "type PDF" step
+    const url = `/api/invoices/pdf?phone=${encodeURIComponent(phone94)}&status=${filter}&token=${encodeURIComponent(sessionToken)}`;
+    const label =
+      filter === "pending"
+        ? "Download pending PDF"
+        : filter === "paid"
+          ? "Download paid PDF"
+          : "Download PDF";
+
+    if (/\btotal\s*paid\b/i.test(normalized)) {
       return {
         reply:
-          formatInvoiceSummaryReply(summary) +
-          "\n\n" +
+          `**Total paid** for **${summary.clientName}**: **LKR ${summary.paidTotal.toLocaleString("en-LK", { minimumFractionDigits: 2 })}** (${summary.paidCount} invoices).\n\n` +
           formatPdfReadyReply(filter),
         waybill: currentWaybill,
         callerPhone,
         sessionToken,
-        suggestions: ["pending pdf", "paid pdf", "help"],
+        suggestions: ["pending invoices", "paid pdf", "help"],
         download: { url, label },
       };
     }
 
-    if (/\btotal\s*paid\b/i.test(normalized)) {
-      return {
-        reply: `**Total paid** for **${summary.clientName}**: **LKR ${summary.paidTotal.toLocaleString("en-LK", { minimumFractionDigits: 2 })}** (${summary.paidCount} invoices).`,
-        waybill: currentWaybill,
-        callerPhone,
-        sessionToken,
-        suggestions: ["pending invoices", "paid pdf", "help"],
-      };
-    }
-
     return {
-      reply: formatInvoiceSummaryReply(summary),
+      reply:
+        formatInvoiceSummaryReply(summary) +
+        "\n\n" +
+        formatPdfReadyReply(filter),
       waybill: currentWaybill,
       callerPhone,
       sessionToken,
       suggestions: ["pending pdf", "paid pdf", "help"],
+      download: { url, label },
     };
   }
 
@@ -1169,9 +1265,12 @@ export function shouldSkipLlm(
   }
 
   if (!normalized) return true;
-  if (isGreeting(normalized) || isHelp(normalized)) return true;
+  if (isGreetingMessage(normalized) || isHelp(normalized)) return true;
+  // Tracking / "any update" — rules path, never sales discovery
+  if (isShipmentUpdateIntent(normalized)) return true;
 
   // Active sales chat must stay with Gemini — never skip for "1"/"2" shortcuts
+  // But don't keep a wrongly opened empty buffer alive for status asks
   if (state.inquiryBuffer || isActiveSalesConversation(history)) {
     if (isConversationClosing(normalized)) return true;
     if (looksLikePhone(message) || normalisePhoneTo94(message)) return true;
@@ -1314,10 +1413,9 @@ function isAmbiguousComplaintTalk(text: string): boolean {
   return /\b(complaint|complain|complaints)\b/i.test(text);
 }
 
+/** @deprecated use isGreetingMessage — kept for any leftover call sites */
 function isGreeting(text: string): boolean {
-  return /^(hi|hello|hey|good\s*(morning|afternoon|evening)|ayo|hola)\b[!?.]*$/.test(
-    text
-  );
+  return isGreetingMessage(text);
 }
 
 function isHelp(text: string): boolean {

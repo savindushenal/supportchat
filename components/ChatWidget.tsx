@@ -20,6 +20,7 @@ type SupportState = {
     topic: string | null;
     fields?: Record<string, string>;
   } | null;
+  pendingAfterOtp?: "invoices" | "journey" | null;
 };
 
 type Message = {
@@ -42,6 +43,7 @@ type ChatApiResponse = {
 const EMPTY_SUPPORT: SupportState = {
   complaintDraft: null,
   inquiryBuffer: null,
+  pendingAfterOtp: null,
 };
 
 const INITIAL_BOT_MESSAGE =
