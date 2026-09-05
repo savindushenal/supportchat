@@ -760,9 +760,26 @@ export function isActiveSalesConversation(
   for (let i = recent.length - 1; i >= 0; i--) {
     const t = recent[i];
     if (!t?.text) continue;
-    const text = t.text.toLowerCase();
+    const text = t.text.toLowerCase().replace(/\s+/g, " ").trim();
+    // Bare menu words alone are NOT an active sales chat
     if (
-      /\b(export|new\s*zealand|\bnz\b|kandy|colombo|australia|cinnamon|kurundu|best\s*quote|competitive\s*export|per\s*shipment|how\s*many\s*(packs?|packages?|cartons?|parcels?)|how\s*much\s*weight|roughly how heavy|sales\s*team|quote|packages?\s*do\s*you|send\s*(a\s+)?(package|parcel)|ship\s*to|want\s*(to\s+)?send|what\s*(product|are you sending)|one-time send)\b/i.test(
+      /^(quote|quotation|pricing|rates?|help|track|tracking|invoices?|re[\s-]?deliver(y)?)$/i.test(
+        text
+      )
+    ) {
+      continue;
+    }
+    if (
+      /\b(export|new\s*zealand|\bnz\b|kandy|colombo|australia|cinnamon|kurundu|best\s*quote|competitive\s*export|per\s*shipment|how\s*many\s*(packs?|packages?|cartons?|parcels?)|how\s*much\s*weight|roughly how heavy|sales\s*team|packages?\s*do\s*you|send\s*(a\s+)?(package|parcel)|ship\s*to|want\s*(to\s+)?send|what\s*(product|are you sending)|one-time send|documents?\s+to|gifts?\s+to)\b/i.test(
+        text
+      )
+    ) {
+      return true;
+    }
+    // Multi-turn quote chat: bot asked destination/product and user answered
+    if (
+      t.role === "bot" &&
+      /\b(which country|what are you sending|how many packs|shipping quote|export options)\b/i.test(
         text
       )
     ) {

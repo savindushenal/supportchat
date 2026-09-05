@@ -153,7 +153,7 @@ export async function runRuleAssistant(
         "Hi — I'm here to help with TransExpress support.\n\n" +
         "What do you need today — tracking, re-delivery, invoices, a complaint, or a quote?",
       ...base(),
-      suggestions: ["help"],
+      suggestions: ["track", "re-delivery", "invoices", "quote", "help"],
     };
   }
 
@@ -163,6 +163,49 @@ export async function runRuleAssistant(
         "Hi! I'm the TransExpress support agent.\n\n" +
         "How can I help you today?\n" +
         "Tracking, re-delivery, invoices, a complaint, shipping quote — just tell me what you need.",
+      ...base(),
+      suggestions: ["track", "re-delivery", "invoices", "quote", "help"],
+    };
+  }
+
+  // Soft entry intents — ask the next useful question (no waybill demanded up front)
+  if (/^(track|tracking|track\s*shipment|check\s*status)$/i.test(normalized)) {
+    return {
+      reply:
+        "Sure — I can check that for you.\n\n" +
+        "What's the **waybill** or the **phone number** on the shipment?",
+      ...base(),
+      suggestions: ["help"],
+    };
+  }
+
+  if (
+    /^(quote|quotation|shipping\s*quote|export\s*quote|rates?|pricing)$/i.test(
+      normalized
+    )
+  ) {
+    // Always start a fresh, friendly quote chat — ignore a weak auto-recovered buffer
+    supportState = {
+      ...supportState,
+      inquiryBuffer: appendInquirySnippet(null, message, {
+        priority: "high",
+        topic: "Shipping quote",
+      }),
+    };
+    return {
+      reply:
+        "Happy to help with a quote.\n\n" +
+        "Where are you looking to send — which country or city?",
+      ...base(),
+      suggestions: ["help"],
+    };
+  }
+
+  if (/^(re[\s-]?deliver(y)?|reschedule)$/i.test(normalized)) {
+    return {
+      reply:
+        "I can arrange a re-delivery follow-up.\n\n" +
+        "Please share the **waybill** (I'll verify with a short SMS code, then log it).",
       ...base(),
       suggestions: ["help"],
     };
@@ -1207,6 +1250,10 @@ function isOutOfScopeChat(
   normalized: string,
   history?: { role: string; text: string }[] | null
 ): boolean {
+  if (isGreetingMessage(normalized)) return false;
+  if (/^(track|tracking|track\s*shipment|check\s*status|quote|quotation|shipping\s*quote|export\s*quote|re[\s-]?deliver(y)?|reschedule)$/i.test(normalized)) {
+    return false;
+  }
   if (extractLookupQuery(message)) return false;
   if (isRedelivery(normalized) || isHumanAgent(normalized)) return false;
   if (/^(otp|send\s*otp|verify|resend)/i.test(normalized)) return false;
@@ -1265,6 +1312,14 @@ export function shouldSkipLlm(
 
   if (!normalized) return true;
   if (isGreetingMessage(normalized) || isHelp(normalized)) return true;
+  if (/^(track|tracking|track\s*shipment|check\s*status)$/i.test(normalized)) {
+    return true;
+  }
+  if (/^(quote|quotation|shipping\s*quote|export\s*quote)$/i.test(normalized)) {
+    // Let Gemini continue discovery after we seed — but bare "quote" can stay rules
+    return true;
+  }
+  if (/^(re[\s-]?deliver(y)?|reschedule)$/i.test(normalized)) return true;
   // Tracking / "any update" — rules path, never sales discovery
   if (isShipmentUpdateIntent(normalized)) return true;
 

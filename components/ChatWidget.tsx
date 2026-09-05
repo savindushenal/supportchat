@@ -66,7 +66,13 @@ export default function ChatWidget() {
   const [sessionToken, setSessionToken] = useState<string | null>(null);
   const [supportState, setSupportState] =
     useState<SupportState>(EMPTY_SUPPORT);
-  const [suggestions, setSuggestions] = useState<string[]>(["help"]);
+  const [suggestions, setSuggestions] = useState<string[]>([
+    "track",
+    "re-delivery",
+    "invoices",
+    "quote",
+    "help",
+  ]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -203,6 +209,10 @@ export default function ChatWidget() {
     if (value === "1") return "1 · Re-delivery";
     if (value === "2") return "2 · Human agent";
     if (value === "help") return "Help";
+    if (value === "track") return "Track shipment";
+    if (value === "re-delivery") return "Re-delivery";
+    if (value === "invoices") return "Invoices";
+    if (value === "quote") return "Shipping quote";
     if (value.toUpperCase() === "OTP") return "Resend code";
     if (value === "pending pdf") return "Pending PDF";
     if (value === "paid pdf") return "Paid PDF";

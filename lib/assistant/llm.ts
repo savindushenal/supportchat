@@ -1132,7 +1132,7 @@ async function runGeminiInner(
               ?.text || "export inquiry",
             state.supportState.inquiryBuffer?.fields
           )
-        : "How can I help with your shipment today?");
+        : "How can I help you today?");
 
     // Always keep inquiry session alive for sales chats (even if model skipped the tool)
     if (salesLead || state.supportState.inquiryBuffer) {
